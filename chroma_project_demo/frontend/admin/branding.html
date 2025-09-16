@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cấu hình Thương hiệu</title>
+    <style>
+        body { font-family: sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 800px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { font-size: 24px; color: #111; border-bottom: 1px solid #eee; padding-bottom: 10px; margin-bottom: 20px; }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; font-weight: bold; margin-bottom: 8px; }
+        .form-group input[type="text"], .form-group input[type="color"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        .form-group input[type="file"] { padding: 5px; }
+        .preview { max-width: 150px; max-height: 40px; margin-top: 10px; border: 1px solid #ddd; padding: 5px; border-radius: 4px; }
+        .favicon-preview { width: 32px; height: 32px; }
+        .button { background-color: #1FAA59; color: white; padding: 12px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; float: right; }
+        .button:hover { background-color: #1A8D4D; }
+        .flex-container { display: flex; gap: 20px; align-items: flex-end; }
+        .flex-item { flex: 1; }
+    </style>
+</head>
+<body>
+
+<div class="container" id="branding-app">
+    <h1>Cấu hình Thương hiệu</h1>
+
+    <div class="form-group">
+        <label for="brand_name">Tên thương hiệu</label>
+        <input type="text" id="brand_name" v-model="config.brand_name" placeholder="e.g., Chroma AI Chat">
+    </div>
+
+    <div class="form-group">
+        <label for="primary_color">Màu chủ đạo</label>
+        <input type="color" id="primary_color" v-model="config.primary_color">
+    </div>
+
+    <div class="form-group">
+        <label>Logo</label>
+        <input type="file" @change="handleFileUpload('logo', $event)">
+        <div v-if="config.brand_logo_url">
+            <img :src="config.brand_logo_url" class="preview" alt="Logo Preview">
+        </div>
+        <div class="flex-container">
+            <div class="flex-item">
+                <label for="logo_height">Chiều cao Logo (CSS)</label>
+                <input type="text" id="logo_height" v-model="config.brand_logo_height" placeholder="e.g., 32px">
+            </div>
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label>Favicon</label>
+        <input type="file" @change="handleFileUpload('favicon', $event)">
+        <div v-if="config.favicon_url">
+            <img :src="config.favicon_url" class="preview favicon-preview" alt="Favicon Preview">
+        </div>
+    </div>
+
+    <button class="button" @click="saveConfig">Lưu cấu hình</button>
+</div>
+
+<!-- Vue.js for reactivity -->
+<script src="https://unpkg.com/vue@3"></script>
+<script>
+    const { createApp } = Vue
+
+    createApp({
+        data() {
+            return {
+                config: {
+                    brand_name: '',
+                    primary_color: '#1FAA59',
+                    brand_logo_url: '',
+                    brand_logo_height: '32px',
+                    favicon_url: ''
+                },
+                // QUAN TRỌNG: Thay thế bằng token thật khi tích hợp
+                authToken: 'Bearer YOUR_ADMIN_AUTH_TOKEN_HERE'
+            }
+        },
+        methods: {
+            async fetchConfig() {
+                try {
+                    const response = await fetch('/api/admin/branding', {
+                        headers: { 'Authorization': this.authToken }
+                    });
+                    if (!response.ok) throw new Error('Failed to fetch config');
+                    const data = await response.json();
+                    // Gán giá trị, giữ lại giá trị mặc định nếu API trả về null
+                    for (const key in data) {
+                        if (data[key] !== null) {
+                            this.config[key] = data[key];
+                        }
+                    }
+                } catch (error) {
+                    console.error('Lỗi khi tải cấu hình:', error);
+                    alert('Không thể tải cấu hình. Vui lòng kiểm tra console.');
+                }
+            },
+            async handleFileUpload(type, event) {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                const endpoint = type === 'logo' ? '/api/admin/branding/upload-logo' : '/api/admin/branding/upload-favicon';
+                const formData = new FormData();
+                formData.append('file', file);
+
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: { 'Authorization': this.authToken },
+                        body: formData
+                    });
+                    if (!response.ok) {
+                         const err = await response.json();
+                         throw new Error(err.detail || 'Upload failed');
+                    }
+                    const result = await response.json();
+                    
+                    if (type === 'logo') {
+                        this.config.brand_logo_url = result.url;
+                    } else {
+                        this.config.favicon_url = result.url;
+                    }
+                    alert('Tải file thành công!');
+                } catch (error) {
+                    console.error(`Lỗi khi tải ${type}:`, error);
+                    alert(`Không thể tải file lên: ${error.message}`);
+                }
+            },
+            async saveConfig() {
+                try {
+                    const response = await fetch('/api/admin/branding', {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': this.authToken
+                        },
+                        body: JSON.stringify(this.config)
+                    });
+                    if (!response.ok) throw new Error('Failed to save config');
+                    alert('Đã lưu cấu hình thành công!');
+                } catch (error) {
+                    console.error('Lỗi khi lưu cấu hình:', error);
+                    alert('Không thể lưu cấu hình. Vui lòng kiểm tra console.');
+                }
+            }
+        },
+        mounted() {
+            this.fetchConfig();
+        }
+    }).mount('#branding-app')
+</script>
+
+</body>
+</html>
