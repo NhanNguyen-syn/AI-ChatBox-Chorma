@@ -25,13 +25,10 @@ export const BrandingProvider: React.FC<{ children: ReactNode }> = ({ children }
             const res = await api.get('/admin/branding');
             setBrandingConfig(res.data);
 
-            // Apply theme colors via CSS variables for Tailwind dynamic colors
+            // Only apply brand title color; do NOT touch Tailwind primary palette
             if (res.data?.primary_color) {
                 const base = tinycolor(res.data.primary_color);
-                document.documentElement.style.setProperty('--color-primary-500', base.toHexString());
-                document.documentElement.style.setProperty('--color-primary-50', base.clone().lighten(35).toHexString());
-                document.documentElement.style.setProperty('--color-primary-600', base.clone().darken(10).toHexString());
-                document.documentElement.style.setProperty('--color-primary-700', base.clone().darken(15).toHexString());
+                document.documentElement.style.setProperty('--brand-title-color', base.toHexString());
             }
 
             // Update favicon

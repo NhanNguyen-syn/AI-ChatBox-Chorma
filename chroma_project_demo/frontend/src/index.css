@@ -39,16 +39,16 @@
 
 @layer components {
 
-  /* Primary button uses CSS variables so it updates instantly when theme color changes */
+  /* Primary button fixed color; branding color does NOT affect */
   .btn-primary {
     @apply text-white font-medium py-2 px-4 rounded-lg transition-colors;
-    background-color: var(--color-primary-600, #16A34A) !important;
-    border-color: var(--color-primary-600, #16A34A) !important;
+    background-color: #308748 !important;
+    border-color: #308748 !important;
   }
 
   .btn-primary:hover {
-    background-color: var(--color-primary-700, #15803D) !important;
-    border-color: var(--color-primary-700, #15803D) !important;
+    background-color: #276E3B !important;
+    border-color: #276E3B !important;
   }
 
   .btn-secondary {
@@ -57,7 +57,7 @@
 
   .bubble-user {
     @apply text-white rounded-xl px-4 py-2 shadow break-words;
-    background-color: var(--color-primary-600, #16A34A);
+    background-color: #308748;
   }
 
   .bubble-ai {
@@ -66,15 +66,15 @@
 
   .btn-send {
     @apply bg-white ring-1 ring-gray-200 shadow-sm focus:outline-none transition-colors;
-    color: var(--color-primary-600, #16A34A);
+    color: #308748;
   }
 
   .btn-send:hover {
-    background-color: var(--color-primary-50, #F0FDF4);
+    background-color: #E7F5EC;
   }
 
   .btn-send:focus {
-    box-shadow: 0 0 0 2px var(--color-primary-500, #22C55E);
+    box-shadow: 0 0 0 2px #30874833;
   }
 
   .btn-send-lg {

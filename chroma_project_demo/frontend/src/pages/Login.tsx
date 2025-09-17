@@ -57,91 +57,77 @@ const Login: React.FC = () => {
                 </div>
 
                 {/* Login Card */}
-                <div className="bg-white/90 backdrop-blur-md rounded-2xl shadow-[0_20px_80px_-20px_rgba(0,0,0,0.5)] border border-white/20 p-8 ring-1 ring-black/5">
-                    <div className="text-center mb-6">
-                        <h2 className="text-xl font-semibold text-gray-800 mb-1">Đăng nhập</h2>
-                        <p className="text-gray-500 text-sm">Chào mừng bạn trở lại! 👋</p>
-                    </div>
-
-                    <form onSubmit={handleSubmit} className="space-y-5">
-                        {/* Username Field */}
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Tên đăng nhập
-                            </label>
-                            <div className="relative">
-                                <User className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-                                <input
-                                    type="text"
-                                    value={username}
-                                    onChange={(e) => setUsername(e.target.value)}
-                                    className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#80DB97]/60 focus:border-[#80DB97] hover:border-[#80DB97]/50 transition-all duration-200 bg-gray-50/80 placeholder-gray-400/80"
-                                    placeholder="Nhập tên đăng nhập của bạn"
-                                    required
-                                />
-                            </div>
+                <div className="relative rounded-3xl p-[1px] bg-gradient-to-br from-emerald-200/60 via-white to-amber-200/60 shadow-[0_30px_120px_-30px_rgba(0,0,0,0.6)]">
+                    <div className="bg-white/85 dark:bg-[#0b0b0b]/80 backdrop-blur-xl rounded-3xl border border-white/30 p-8">
+                        <div className="text-center mb-6">
+                            <h2 className="text-2xl font-extrabold text-gray-900 dark:text-gray-100 mb-1 tracking-tight">Đăng nhập</h2>
+                            <p className="text-gray-500 text-sm">Chào mừng bạn trở lại! 👋</p>
                         </div>
 
-                        {/* Password Field */}
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Mật khẩu
-                            </label>
-                            <div className="relative">
-                                <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-                                <input
-                                    type={showPassword ? 'text' : 'password'}
-                                    value={password}
-                                    onChange={(e) => setPassword(e.target.value)}
-                                    className="w-full pl-10 pr-12 py-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#80DB97]/60 focus:border-[#80DB97] hover:border-[#80DB97]/50 transition-all duration-200 bg-gray-50/80 placeholder-gray-400/80"
-                                    placeholder="Nhập mật khẩu của bạn"
-                                    required
-                                />
-                                <button
-                                    type="button"
-                                    onClick={() => setShowPassword(!showPassword)}
-                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                                >
-                                    {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Login Button */}
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            className="w-full bg-[#80DB97] text-white py-3 px-4 rounded-lg font-medium shadow-[0_12px_32px_-12px_rgba(128,219,151,0.8)] hover:shadow-[0_18px_40px_-12px_rgba(128,219,151,0.9)] hover:-translate-y-0.5 active:translate-y-0 focus:ring-2 focus:ring-[#80DB97]/60 focus:ring-offset-2 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            {loading ? (
-                                <div className="flex items-center justify-center">
-                                    <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></div>
-                                    Đang đăng nhập...
+                        <form onSubmit={handleSubmit} className="space-y-5">
+                            {/* Username Field */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Tên đăng nhập</label>
+                                <div className="relative">
+                                    <User className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
+                                    <input
+                                        type="text"
+                                        value={username}
+                                        onChange={(e) => setUsername(e.target.value)}
+                                        className="w-full pl-10 pr-4 py-3 rounded-xl border ring-1 ring-gray-200/70 bg-emerald-50/50 focus:ring-2 focus:ring-emerald-400/60 focus:border-emerald-400 placeholder-gray-400 transition-all duration-200"
+                                        placeholder="Nhập tên đăng nhập của bạn"
+                                        required
+                                    />
                                 </div>
-                            ) : (
-                                'Đăng nhập'
-                            )}
-                        </button>
-                    </form>
+                            </div>
 
-                    {/* Forgot Password */}
-                    <div className="text-center mt-6">
-                        <Link
-                            to="/forgot-password"
-                            className="text-sm text-gray-600 hover:text-[#80DB97] transition-colors"
-                        >
-                            Quên mật khẩu?
-                        </Link>
-                    </div>
+                            {/* Password Field */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Mật khẩu</label>
+                                <div className="relative">
+                                    <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
+                                    <input
+                                        type={showPassword ? 'text' : 'password'}
+                                        value={password}
+                                        onChange={(e) => setPassword(e.target.value)}
+                                        className="w-full pl-10 pr-12 py-3 rounded-xl border ring-1 ring-gray-200/70 bg-emerald-50/50 focus:ring-2 focus:ring-emerald-400/60 focus:border-emerald-400 placeholder-gray-400 transition-all duration-200"
+                                        placeholder="Nhập mật khẩu của bạn"
+                                        required
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowPassword(!showPassword)}
+                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+                                    >
+                                        {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                                    </button>
+                                </div>
+                            </div>
 
-                    {/* Create Account */}
-                    <div className="text-center mt-4">
-                        <Link
-                            to="/register"
-                            className="text-sm text-gray-600 hover:text-[#80DB97] transition-colors"
-                        >
-                            Tạo tài khoản mới
-                        </Link>
+                            {/* Login Button */}
+                            <button
+                                type="submit"
+                                disabled={loading}
+                                className="w-full py-3 px-4 rounded-xl font-semibold text-white bg-gradient-to-r from-emerald-400 to-emerald-500 hover:from-emerald-500 hover:to-emerald-600 shadow-lg shadow-emerald-500/30 focus:outline-none focus:ring-2 focus:ring-emerald-400/50 focus:ring-offset-2 transition-all disabled:opacity-50"
+                            >
+                                {loading ? (
+                                    <div className="flex items-center justify-center">
+                                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></div>
+                                        Đang đăng nhập...
+                                    </div>
+                                ) : (
+                                    'Đăng nhập'
+                                )}
+                            </button>
+                        </form>
+
+                        {/* Links */}
+                        <div className="text-center mt-6">
+                            <Link to="/forgot-password" className="text-sm text-gray-600 hover:text-emerald-600 transition-colors">Quên mật khẩu?</Link>
+                        </div>
+                        <div className="text-center mt-3">
+                            <Link to="/register" className="text-sm text-gray-600 hover:text-emerald-600 transition-colors">Tạo tài khoản mới</Link>
+                        </div>
                     </div>
                 </div>
             </div>

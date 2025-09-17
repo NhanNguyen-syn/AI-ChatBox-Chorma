@@ -17,6 +17,7 @@ import {
     MoreVertical,
     Trash2,
     AlertTriangle,
+    Menu,
     X
 } from 'lucide-react'
 
@@ -176,6 +177,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
     const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
 
+    // Mobile sidebar state
+    const [isSidebarOpen, setSidebarOpen] = React.useState(false)
+
     const handleLogout = () => {
         logout()
         navigate('/login')
@@ -199,28 +203,34 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0a]">
             {/* Header */}
             <header className="bg-white shadow-sm border-b dark:bg-[#0d0d0d] dark:border-gray-800">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 lg:px-8">
                     <div className="flex justify-between items-center h-16">
-                        <div className="flex items-center">
+                        <div className="flex items-center gap-2">
+                            {/* Mobile menu button */}
+                            <button
+                                className="md:hidden inline-flex items-center justify-center h-9 w-9 rounded-md ring-1 ring-gray-200 bg-white hover:bg-gray-50 text-gray-700"
+                                onClick={() => setSidebarOpen(true)}
+                                aria-label="Mở menu"
+                            >
+                                <Menu className="h-5 w-5" />
+                            </button>
+
                             <Link to="/dashboard" className="flex items-center space-x-2">
                                 {brandingConfig?.brand_logo_url ? (
                                     <img
                                         src={brandingConfig.brand_logo_url}
                                         alt={brandingConfig.brand_name || 'Logo'}
                                         style={{ height: brandingConfig.brand_logo_height || '32px' }}
-
                                     />
-                                ) : (
-                                    <Shield className="h-8 w-8 text-primary-600" />
-                                )}
-                                <span className="text-xl font-extrabold text-primary-700">
+                                ) : null}
+                                <span className="text-lg sm:text-xl font-extrabold" style={{ color: 'var(--brand-title-color, #308748)' }}>
                                     {brandingConfig?.brand_name || 'Dalat Hasfarm AI Chat'}
                                 </span>
-                                <span className="inline-block h-2.5 w-2.5 rounded-full bg-secondary-500"></span>
+                                <span className="hidden sm:inline-block h-2.5 w-2.5 rounded-full bg-secondary-500"></span>
                             </Link>
                         </div>
 
-                        <div className="flex items-center space-x-4">
+                        <div className="flex items-center space-x-3 sm:space-x-4">
                             <button
                                 onClick={toggleTheme}
                                 title={theme === 'dark' ? 'Chuyển nền sáng' : 'Chuyển nền tối'}
@@ -228,11 +238,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                             >
                                 {theme === 'dark' ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
                             </button>
-                            <span className="text-sm text-gray-700 dark:text-gray-200">
+                            <span className="hidden sm:inline text-sm text-gray-700 dark:text-gray-200">
                                 Xin chào, {user?.full_name}
                             </span>
                             {user?.is_admin && (
-                                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-secondary-100 text-secondary-700">
+                                <span className="hidden sm:inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-secondary-100 text-secondary-700">
                                     Admin
                                 </span>
                             )}
@@ -241,16 +251,49 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                                 className="flex items-center space-x-1 text-gray-600 hover:text-gray-900 dark:text-gray-200 dark:hover:text-white"
                             >
                                 <LogOut className="h-4 w-4" />
-                                <span>Đăng xuất</span>
+                                <span className="hidden sm:inline">Đăng xuất</span>
                             </button>
                         </div>
                     </div>
                 </div>
             </header>
 
+            {/* Mobile Drawer */}
+            {isSidebarOpen && (
+                <div className="fixed inset-0 z-50 md:hidden">
+                    <div className="absolute inset-0 bg-black/30" onClick={() => setSidebarOpen(false)} />
+                    <nav className="absolute left-0 top-0 h-full w-72 bg-white dark:bg-[#0d0d0d] shadow-lg p-4 overflow-y-auto">
+                        <div className="mb-4 flex items-center justify-between">
+                            <span className="text-sm font-semibold text-gray-600 dark:text-gray-300">Menu</span>
+                            <button onClick={() => setSidebarOpen(false)} className="h-8 w-8 inline-flex items-center justify-center rounded hover:bg-gray-100 dark:hover:bg-gray-800">
+                                <X className="h-4 w-4" />
+                            </button>
+                        </div>
+                        <div className="space-y-2">
+                            {navItems.map((item) => {
+                                const Icon = item.icon
+                                return (
+                                    <Link key={item.name} to={item.href} onClick={() => setSidebarOpen(false)}
+                                        className="flex items-center gap-3 px-3 py-2 rounded-lg text-gray-700 hover:bg-primary-50 hover:text-primary-700 dark:text-gray-200 dark:hover:bg-gray-800">
+                                        <Icon className="h-5 w-5" />
+                                        <span>{item.name}</span>
+                                    </Link>
+                                )
+                            })}
+                            {user && !user.is_admin && (
+                                <div className="mt-6">
+                                    <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider px-3 mb-2">Đoạn Chat</h4>
+                                    <ChatSessionsList />
+                                </div>
+                            )}
+                        </div>
+                    </nav>
+                </div>
+            )}
+
             <div className="flex">
-                {/* Sidebar */}
-                <nav className="fixed top-16 left-0 w-64 bg-white shadow-sm dark:bg-[#0d0d0d] dark:border-r dark:border-gray-800 h-[calc(100vh-4rem)] overflow-y-auto z-40">
+                {/* Sidebar (desktop) */}
+                <nav className="hidden md:block fixed top-16 left-0 w-64 bg-white shadow-sm dark:bg-[#0d0d0d] dark:border-r dark:border-gray-800 h-[calc(100vh-4rem)] overflow-y-auto z-40">
                     <div className="p-4">
                         <nav className="space-y-2">
                             {navItems.map((item) => {
@@ -279,7 +322,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 </nav>
 
                 {/* Main content */}
-                <main className="flex-1 p-6 text-gray-900 dark:bg-[#0a0a0a] dark:text-gray-100 min-h-screen ml-64">
+                <main className="flex-1 p-4 sm:p-6 text-gray-900 dark:bg-[#0a0a0a] dark:text-gray-100 min-h-screen md:ml-64">
                     {children}
                 </main>
             </div>

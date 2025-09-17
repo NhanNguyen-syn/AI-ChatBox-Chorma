@@ -153,6 +153,138 @@ def _split_paragraphs(text: str) -> list[str]:
     return merged
 
 
+# ---------------- Semantic chunking helpers ----------------
+from typing import Iterable
+import math
+
+
+def _split_sentences(text: str) -> list[str]:
+    # Lightweight sentence splitter for vi/en
+    if not text:
+        return []
+    # Normalize new lines to help boundary detection
+    t = re.sub(r"[\r]+", "\n", text)
+    # Protect table-like lines to not split within
+    lines = [ln for ln in t.split("\n")]
+    sents: list[str] = []
+    buf = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            if buf:
+                sents.append(" ".join(buf).strip())
+                buf = []
+            continue
+        # If looks like a bullet item, flush previous
+        if re.match(r"^[-*•▪►➤]\s+", ln):
+            if buf:
+                sents.append(" ".join(buf).strip())
+                buf = []
+            sents.append(ln)
+            continue
+        # Split by sentence enders but keep short fragments together
+        parts = re.split(r"(?<=[\.!?…])\s+", ln)
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            if len(p) < 30:
+                buf.append(p)
+            else:
+                if buf:
+                    p = " ".join(buf + [p])
+                    buf = []
+                sents.append(p)
+    if buf:
+        sents.append(" ".join(buf).strip())
+    return [s for s in sents if s]
+
+
+def _embed_texts(texts: list[str]) -> list[list[float]]:
+    """Return embeddings for texts using OpenAI if available, else sentence-transformers if present.
+    Fallback to simple hashing vector to avoid failure in dev environments.
+    """
+    if not texts:
+        return []
+    try:
+        # Reuse OpenAI path from this module if available
+        if USE_OPENAI and openai_client:
+            # Batch in chunks to respect token limits
+            embs: list[list[float]] = []
+            MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+            for i in range(0, len(texts), 50):
+                batch = texts[i:i+50]
+                resp = openai_client.embeddings.create(model=MODEL, input=batch)
+                embs.extend([d.embedding for d in resp.data])
+            return embs
+    except Exception as _oe:
+        print(f"[Semantic] OpenAI embed failed, fallback: {_oe}")
+    try:
+        if _st_model is not None:
+            return [list(map(float, v)) for v in _st_model.encode(texts, convert_to_numpy=True)]
+    except Exception as _se:
+        print(f"[Semantic] ST embed failed, fallback: {_se}")
+    # Fallback: 64-dim hashing vector
+    dim = 64
+    vecs: list[list[float]] = []
+    for s in texts:
+        v = [0.0]*dim
+        for i, ch in enumerate(s.encode("utf-8")):
+            v[i % dim] += (ch % 23) / 10.0
+        vecs.append(v)
+    return vecs
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    num = sum(x*y for x, y in zip(a, b))
+    da = math.sqrt(sum(x*x for x in a))
+    db = math.sqrt(sum(y*y for y in b))
+    if da == 0 or db == 0:
+        return 0.0
+    return num / (da * db)
+
+
+def _semantic_chunk_text(text: str, target_chars: int = DEFAULT_CHUNK_SIZE, min_sim: float = 0.55) -> list[str]:
+    sents = _split_sentences(text)
+    if not sents:
+        return [text.strip()] if text.strip() else []
+    embs = _embed_texts(sents)
+    chunks: list[str] = []
+    buf: list[str] = []
+    cur_len = 0
+    for i, sent in enumerate(sents):
+        e_prev = embs[i-1] if i > 0 else None
+        e_cur = embs[i]
+        sim_ok = True
+        if e_prev is not None:
+            sim_ok = (_cosine(e_prev, e_cur) >= min_sim)
+        # Start new chunk if size exceeded or semantic drop
+        if buf and (cur_len + len(sent) > target_chars or not sim_ok):
+            chunks.append(" ".join(buf).strip())
+            buf = [sent]
+            cur_len = len(sent)
+        else:
+            buf.append(sent)
+            cur_len += len(sent)
+    if buf:
+        chunks.append(" ".join(buf).strip())
+    return [c for c in chunks if c]
+
+
+def _semantic_chunk_documents(documents: list[LCDocument]) -> list[LCDocument]:
+    out: list[LCDocument] = []
+    for d in documents:
+        txt = getattr(d, 'page_content', '') or ''
+        md = getattr(d, 'metadata', {}) or {}
+        if not txt.strip():
+            continue
+        parts = _semantic_chunk_text(txt)
+        for p in parts:
+            out.append(LCDocument(page_content=p, metadata=dict(md)))
+    # Respect overlap by lightly merging very small trailing chunks
+    return out
+
+
 def _is_probable_heading(line: str) -> bool:
     s = (line or "").strip()
     if not s:
@@ -605,18 +737,16 @@ def process_file_content(db: Session, file_path: str, file_type: str, base_metad
         else:
             raise ValueError(f"Unsupported file type: {file_type}")
 
-        # Split documents into chunks
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1400,
-            chunk_overlap=150
-        )
-        chunks = text_splitter.split_documents(documents)
+        # Split documents into chunks using semantic chunking first
+        chunks = _semantic_chunk_documents(documents)
+        if not chunks:
+            # Fallback to character-based splitter
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1400, chunk_overlap=150)
+            chunks = text_splitter.split_documents(documents)
         # Gắn metadata chi tiết theo chunk
         for i, ch in enumerate(chunks):
             md = getattr(ch, 'metadata', {}) or {}
-            md.update({
-                'chunk_index': i,
-            })
+            md.update({'chunk_index': i})
             ch.metadata = md
         if not chunks:
             raise HTTPException(status_code=400, detail="Không trích xuất được nội dung (kết quả rỗng).")

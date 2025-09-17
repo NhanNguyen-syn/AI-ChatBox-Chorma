@@ -175,7 +175,7 @@ except Exception:
 
 from typing import List
 
-from database import get_db, ChatSession, ChatMessage, User, get_chroma_collection, get_all_chroma_collections, CrmProduct, OcrText, AllowanceTable, ExcelRow, engine, TemporaryContext
+from database import get_db, ChatSession, ChatMessage, User, get_chroma_collection, get_all_chroma_collections, get_chroma_collection_for_backend, CrmProduct, OcrText, AllowanceTable, ExcelRow, engine, TemporaryContext
 from auth.jwt_handler import verify_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -191,6 +191,7 @@ except Exception as e:
     print(f"[Chat] Gemini service not available: {e}")
     GEMINI_AVAILABLE = False
 
+from services.cache import qa_cache_get, qa_cache_set
 router = APIRouter()
 security = HTTPBearer()
 
@@ -1032,7 +1033,8 @@ def get_ai_response(
     message: str,
     context: str = "",
     history: list[dict] | None = None,
-    intent: str = "SIMPLE_QA"
+    intent: str = "SIMPLE_QA",
+    session: Optional[ChatSession] = None
 ) -> tuple[str, int, int]:
     """Return (response_text, tokens_used, response_time_ms)."""
     start = time.time()
@@ -1055,10 +1057,22 @@ def get_ai_response(
     if (not context or not context.strip()) and (_looks_like_ack(message) or _looks_like_too_generic(message)):
         return ("Xin lỗi, tôi không chắc về thông tin này", 0, int((time.time() - start) * 1000))
 
+    # Fast QA cache lookup
+    try:
+        cached = qa_cache_get(message, context)
+        if cached and isinstance(cached, dict) and cached.get("text"):
+            return str(cached.get("text")), 0, int((time.time() - start) * 1000)
+    except Exception:
+        pass
+
     try:
         parsed = parse_allowance_table(context)
         exact = try_answer_allowance_question(message, parsed)
         if exact:
+            try:
+                qa_cache_set(message, context, {"text": exact, "intent": intent})
+            except Exception:
+                pass
             return exact, 0, int((time.time() - start) * 1000)
     except Exception as _pe:
         dlog(f"[Chat] allowance parser skipped: {_pe}")
@@ -1126,7 +1140,12 @@ def get_ai_response(
                     '```json\n{"tool_name": "table_calculator", "table": "<toàn bộ bảng dạng Markdown>", "operation": "<SUM|AVG|MAX|MIN>", "column": "<tên cột>"}\n```'
                 )
 
-            user_prompt = f"Thông tin từ tài liệu:\n{context}\n\nCâu hỏi: {message}" if context.strip() else message
+            # Inject rolling summary if available
+            summary_context = ""
+            if history and len(history) > 2 and session and session.summary:
+                summary_context = f"Tóm tắt cuộc trò chuyện trước:\n{session.summary}\n\n---\n\n"
+
+            user_prompt = f"{summary_context}Thông tin từ tài liệu:\n{context}\n\nCâu hỏi: {message}" if context.strip() else message
             msgs = [{"role": "system", "content": sys_prompt}]
             if history: msgs.extend(history[-HISTORY_MAX_HISTORY_MESSAGES:])
             msgs.append({"role": "user", "content": user_prompt})
@@ -1157,20 +1176,37 @@ def get_ai_response(
                         final_tokens = final_usage.total_tokens if final_usage and hasattr(final_usage, 'total_tokens') else 0
                         total_tokens = tokens + final_tokens
 
+                        try:
+                            qa_cache_set(message, context, {"text": final_text, "intent": intent})
+                        except Exception:
+                            pass
                         return final_text, total_tokens, int((time.time() - start) * 1000)
                 except Exception as e:
                     print(f"[Chat] Tool call processing failed: {e}")
                     return f"Lỗi khi xử lý yêu cầu công cụ: {e}", tokens, int((time.time() - start) * 1000)
 
+            try:
+                qa_cache_set(message, context, {"text": text, "intent": intent})
+            except Exception:
+                pass
             return text, tokens, int((time.time() - start) * 1000)
 
         # Fallback for other models...
         if 'llm' in globals() and llm:
             prompt = f"Context: {context}\n\nQuestion: {message}\n\nAnswer:" if context else f"Question: {message}\n\nAnswer:"
             text = (llm.invoke(prompt) or "").strip()
+            try:
+                qa_cache_set(message, context, {"text": text, "intent": intent})
+            except Exception:
+                pass
             return text, 0, int((time.time() - start) * 1000)
 
-        return ("Xin lỗi, mình chưa có đủ ngữ cảnh đáng tin cậy để trả lời câu hỏi này.", 0, int((time.time() - start) * 1000))
+        _fallback_text = "Xin lỗi, mình chưa có đủ ngữ cảnh đáng tin cậy để trả lời câu hỏi này."
+        try:
+            qa_cache_set(message, context, {"text": _fallback_text, "intent": intent})
+        except Exception:
+            pass
+        return (_fallback_text, 0, int((time.time() - start) * 1000))
     except Exception as e:
         return (f"Error generating response: {str(e)}", 0, int((time.time() - start) * 1000))
 
@@ -2119,11 +2155,13 @@ def _get_session_temp_context(db: Session, session_id: str, user_id: str) -> str
 async def upload_context_file(
     session_id: str = Form(...),
     file: UploadFile = File(...),
+    index_to_vector: bool = Form(True),
     user: User = Depends(verify_user),
     db: Session = Depends(get_db)
 ):
-    """Upload a file to be used as TEMPORARY context for this chat session.
-    It will not be indexed into global vector DB. Replaces previous temp context for the session.
+    """Upload a file for this chat session.
+    - Always saves a TEMPORARY plain-text context (TTL configured) for immediate use
+    - If index_to_vector=True, will ALSO chunk + embed the file into Chroma collection so it is searchable later
     """
     # Validate/ensure session belongs to user
     session = db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == user.id).first()
@@ -2142,6 +2180,43 @@ async def upload_context_file(
         db.commit(); db.refresh(row)
     except Exception as e:
         db.rollback()
+
+    # Optionally index this file into vector DB so it is available to retrieval
+    if index_to_vector:
+        try:
+            # Persist to disk first (under uploads/) then reuse existing pipeline from files router
+            up_dir = "uploads"; os.makedirs(up_dir, exist_ok=True)
+            safe_path = os.path.join(up_dir, f"{uuid.uuid4()}_{meta.get('filename','upload')}")
+            await file.seek(0)
+            raw = await file.read()
+            with open(safe_path, "wb") as fh:
+                fh.write(raw)
+
+            # Import the high-quality processing from files router to keep chunking consistent
+            from routers.files import process_file_content  # type: ignore
+            base_md = {"filename": meta.get('filename'), "uploader": user.username, "session_id": session.id, "file_type": meta.get('type')}
+            chunks = process_file_content(db, safe_path, (meta.get('type') or '').lower(), base_metadata=base_md)
+            if chunks:
+                texts = [getattr(ch, 'page_content', '') for ch in chunks]
+                metadatas = [getattr(ch, 'metadata', {}) for ch in chunks]
+                # Use OpenAI embeddings if available (same as files.upload)
+                chunk_embeddings: list[list[float]] = []
+                backend = "openai" if (USE_OPENAI and openai_client) else "ollama"
+                if USE_OPENAI and openai_client:
+                    for t in texts:
+                        resp = openai_client.embeddings.create(model=_cfg_embed_model(OPENAI_EMBED_MODEL), input=t)
+                        chunk_embeddings.append(resp.data[0].embedding)
+                else:
+                    raise Exception("No primary embeddings backend is available for user indexing")
+                emb_dim = len(chunk_embeddings[0]) if chunk_embeddings else None
+                from database import get_chroma_collection_for_backend
+                collection = get_chroma_collection_for_backend(backend, emb_dim) or get_chroma_collection()
+                if collection:
+                    ids = [str(uuid.uuid4()) for _ in chunks]
+                    collection.add(embeddings=chunk_embeddings, documents=texts, metadatas=metadatas, ids=ids)
+                    print(f"[Index(User)] Added {len(ids)} chunks for session {session.id}")
+        except Exception as _idx_err:
+            print(f"[Index(User)] Failed to index uploaded file: {_idx_err}")
 
 @router.delete("/upload-context-file")
 async def clear_context_file(
@@ -2364,7 +2439,8 @@ async def send_message(
                     request.message,
                     final_context,
                     history=history,
-                    intent=_map_nlq_to_generation_intent(nlq.get("intent", "DESCRIPTIVE"))
+                    intent=_map_nlq_to_generation_intent(nlq.get("intent", "DESCRIPTIVE")),
+                    session=session
                 )
 
             # Build follow-up suggestions (UI can surface these as clickable chips)
@@ -2555,6 +2631,7 @@ async def send_message_with_files(
                                 ]}
                             ],
                             temperature=0.0,
+
                         )
                         extracted_texts.append(vis_text.choices[0].message.content or "")
                         # 2) Caption + tags/entities for recognition
@@ -2650,7 +2727,7 @@ async def send_message_with_files(
     elif STRICT_CONTEXT_ONLY and not full_ctx.strip() and _requires_internal_docs(message):
         ai_text, tokens_used, response_time_ms = ("Xin lỗi, mình chưa tìm thấy thông tin...", 0, 0)
     else:
-        ai_text, tokens_used, response_time_ms = get_ai_response(message or "(Người dùng gửi tệp)", full_ctx, history=history)
+        ai_text, tokens_used, response_time_ms = get_ai_response(message or "(Người dùng gửi tệp)", full_ctx, history=history, session=session)
 
     user_message = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message=msg_with_images, response="", is_user=True, timestamp=datetime.now(timezone.utc), tokens_used=tokens_used, response_time=response_time_ms)
     db.add(user_message)
@@ -2669,6 +2746,19 @@ async def send_message_with_files(
                 db.commit()
     except Exception as _e:
         print(f"[Chat] Auto-title (files) failed: {_e}")
+
+    # Update rolling summary for the session (files endpoint)
+    try:
+        hist_msgs = db.query(ChatMessage).filter(ChatMessage.session_id == session.id).order_by(ChatMessage.timestamp).all()
+        hist_list = []
+        for hm in hist_msgs[-HISTORY_MAX_HISTORY_MESSAGES:]:
+            if hm.is_user:
+                hist_list.append({"role": "user", "content": hm.message or ""})
+            else:
+                hist_list.append({"role": "assistant", "content": hm.response or ""})
+        _update_session_summary(db, session, hist_list)
+    except Exception as _se:
+        print(f"[Chat] Update rolling summary failed (files): {_se}")
 
     db.commit()
 
@@ -2846,7 +2936,11 @@ async def stream_message(
                 buffer: list[str] = []
                 if USE_OPENAI and openai_client:
                     try:
-                        user_prompt = f"Thông tin từ tài liệu:\n{final_context}\n\nCâu hỏi: {request.message}" if final_context.strip() else request.message
+                        summary_context = f"Tóm tắt cuộc trò chuyện trước:\n{session.summary}\n\n---\n\n" if (session and session.summary) else ""
+                        user_prompt = (
+                            f"{summary_context}Thông tin từ tài liệu:\n{final_context}\n\nCâu hỏi: {request.message}"
+                            if final_context.strip() else f"{summary_context}{request.message}"
+                        )
                         messages = [{"role": "system", "content": "Bạn là một trợ lý AI chuyên nghiệp..."}]
                         if history: messages.extend(history[-HISTORY_MAX_HISTORY_MESSAGES:])
                         messages.append({"role": "user", "content": user_prompt})
@@ -2857,11 +2951,15 @@ async def stream_message(
                                 buffer.append(delta)
                                 yield delta.encode("utf-8")
                         full_text = "".join(buffer).strip()
+                        try:
+                            qa_cache_set(request.message, final_context, {"text": full_text, "intent": "SIMPLE_QA"})
+                        except Exception:
+                            pass
                     except Exception as oe:
                         print(f"[Chat] OpenAI stream failed: {oe}")
 
                 if not full_text:
-                    full_text, _, _ = get_ai_response(request.message, final_context, history=history)
+                    full_text, _, _ = get_ai_response(request.message, final_context, history=history, session=session)
                     yield full_text.encode("utf-8")
         finally:
             elapsed = int((time.time() - started) * 1000)
@@ -2869,6 +2967,19 @@ async def stream_message(
             db.add(user_msg)
             ai_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message="", response=full_text, is_user=False, timestamp=datetime.now(timezone.utc), sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None)
             db.add(ai_msg)
+
+            # Update rolling summary for the session
+            try:
+                hist_msgs = db.query(ChatMessage).filter(ChatMessage.session_id == session.id).order_by(ChatMessage.timestamp).all()
+                hist_list = []
+                for hm in hist_msgs[-HISTORY_MAX_HISTORY_MESSAGES:]:
+                    if hm.is_user:
+                        hist_list.append({"role": "user", "content": hm.message or ""})
+                    else:
+                        hist_list.append({"role": "assistant", "content": hm.response or ""})
+                _update_session_summary(db, session, hist_list)
+            except Exception as _se:
+                print(f"[Chat] Update rolling summary failed (stream): {_se}")
 
             try:
                 if (not session.title) or session.title == "Đoạn Chat" or session.title.startswith(request.message[:20]):

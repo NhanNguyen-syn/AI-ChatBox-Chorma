@@ -88,7 +88,6 @@ $env:ROLLING_SUMMARY_MAX_MESSAGES=”30”
 $env:ALLOW_WEB_SEARCH=”1”
 $env:AUGMENT_MODE=”1”
 $env:WEB_SEARCH_RESULTS=”3”
-
 uvicorn main:app --reload 
 ```
 
@@ -102,7 +101,7 @@ Mở một terminal khác, di chuyển đến `chroma_project_demo/frontend` và
 npm run dev
 ```
 
-Ứng dụng sẽ tự động mở trong trình duyệt tại `http://localhost:3000`.
+Ứng dụng sẽ tự động mở trong trình duyệt tại `http://localhost:3002`.
 
 ## Các tính năng chính
 
@@ -110,6 +109,13 @@ npm run dev
 *   **Admin Dashboard:**
     *   **Tổng quan:** Xem thống kê hệ thống.
     *   **Quản lý User:** Kích hoạt/vô hiệu hóa, cấp/hủy quyền admin.
-    *   **Cấu hình AI:** Thay đổi mô hình AI, embedding model, ngưỡng similarity và max tokens.
     *   **Thương hiệu:** Tùy chỉnh logo, tên và màu sắc chủ đạo của ứng dụng.
 
+## Tài khoản admin và user đã tạo để test 
+## admin
+Tài khoản : admin
+Mật khẩu : admin123
+
+## user
+Tài khoản : admin123
+Mật khẩu : admin123

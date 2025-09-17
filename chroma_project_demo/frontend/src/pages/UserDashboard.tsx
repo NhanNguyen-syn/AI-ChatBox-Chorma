@@ -98,6 +98,7 @@ const UserDashboard: React.FC = () => {
             }
         } catch { }
 
+
         setMessages(prev => [...prev, userMessage])
         setInputMessage('')
         setIsLoading(true)
@@ -251,11 +252,11 @@ const UserDashboard: React.FC = () => {
     }
 
     return (
-        <div className="h-screen flex flex-col">
+        <div className="min-h-screen flex flex-col">
             {/* Header */}
-            <div className="bg-white border-b px-6 py-4 dark:bg-[#0d0d0d] dark:border-gray-800">
+            <div className="bg-white border-b px-3 sm:px-6 py-3 sm:py-4 dark:bg-[#0d0d0d] dark:border-gray-800">
                 <div className="flex items-center justify-between">
-                    <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Chat AI</h1>
+                    <h1 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-gray-100">Chat AI</h1>
                     <div className="flex items-center gap-2">
                         <style>{`
                 .no-scrollbar::-webkit-scrollbar { display: none; }
@@ -282,14 +283,14 @@ const UserDashboard: React.FC = () => {
                 </div>
             </div>
 
-            <div className="flex-1 flex gap-6">
+            <div className="flex-1 flex gap-3 sm:gap-6">
                 {/* Avatar Panel (left) */}
                 {showAssistant && (
-                    <div className="hidden lg:block order-2 w-[360px] border-l bg-white dark:bg-[#0d0d0d] dark:border-gray-800">
+                    <div className="hidden lg:block order-2 w-[300px] xl:w-[360px] border-l bg-white dark:bg-[#0d0d0d] dark:border-gray-800">
                         <div className="sticky top-0 p-3">
                             <div className="px-1 pb-2 text-[11px] font-medium tracking-wide text-gray-500 dark:text-gray-300">Gove Agent</div>
-                            <div className="h-[460px] w-full overflow-hidden rounded-2xl border border-white/60 bg-white/70 backdrop-blur-sm shadow-sm dark:bg-white/[0.04] dark:border-white/[0.08]">
-                                <Avatar3D modelUrl="/models/Dove.glb" />
+                            <div className="h-[380px] xl:h-[460px] w-full overflow-hidden rounded-2xl border border-white/60 bg-white/70 backdrop-blur-sm shadow-sm dark:bg-white/[0.04] dark:border-white/[0.08]">
+                                <Avatar3D modelUrl="/models/AnimatedCharacter.glb" />
                             </div>
                         </div>
                     </div>

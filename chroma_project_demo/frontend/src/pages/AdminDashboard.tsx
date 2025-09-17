@@ -486,12 +486,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ initialTab = 'overview'
                                             const newColor = e.target.value;
                                             setBrandingConfig(c => ({ ...c, primary_color: newColor }));
 
-                                            // Update CSS variables for live preview
-                                            const color = tinycolor(newColor);
-                                            document.documentElement.style.setProperty('--color-primary-500', newColor);
-                                            document.documentElement.style.setProperty('--color-primary-50', color.lighten(35).toHexString());
-                                            document.documentElement.style.setProperty('--color-primary-600', color.darken(10).toHexString());
-                                            document.documentElement.style.setProperty('--color-primary-700', color.darken(15).toHexString());
+                                            // Update only title color for live preview
+                                            document.documentElement.style.setProperty('--brand-title-color', newColor);
                                         }}
                                         className="w-full h-10 p-1 border border-gray-300 rounded-lg"
                                     />
