@@ -5,7 +5,7 @@ import toast from 'react-hot-toast'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useLocation, useNavigate } from 'react-router-dom'
-import Avatar3D, { avatarBus, classifyEmotionFromText } from '../components/Avatar3D'
+import Avatar3D, { avatarBus } from '../components/Avatar3D'
 
 
 interface AttachmentPreview {
@@ -38,6 +38,12 @@ const UserDashboard: React.FC = () => {
     const dragCounter = useRef(0)
     const [showAssistant, setShowAssistant] = useState(true)
     const [feedbackSent, setFeedbackSent] = useState<{ [messageId: string]: boolean }>({})
+
+    useEffect(() => {
+        // Greet user on initial load
+        avatarBus.set('happy')
+        setTimeout(() => avatarBus.set('idle'), 2500) // Return to idle after wave
+    }, [])
 
     useEffect(() => {
         const prevent = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); }
@@ -89,14 +95,7 @@ const UserDashboard: React.FC = () => {
         }
 
 
-        // Detect rude/spam words to reflect Angry state briefly
-        try {
-            const norm = (inputMessage || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-            if (/(dm|dmm|dit|djt|cmm|fuck|shit|ngu|xuc pham|chui)/.test(norm)) {
-                avatarBus.set('angry')
-                setTimeout(() => avatarBus.set('idle'), 2500)
-            }
-        } catch { }
+
 
 
         setMessages(prev => [...prev, userMessage])
@@ -120,10 +119,8 @@ const UserDashboard: React.FC = () => {
                     timestamp: new Date().toISOString()
                 }
                 setMessages(prev => [...prev, aiMessage])
-                const mood = classifyEmotionFromText(response.data.response || '')
                 avatarBus.set('talk')
-                setTimeout(() => avatarBus.set(mood), 1200)
-                setTimeout(() => avatarBus.set('idle'), 5200)
+                setTimeout(() => avatarBus.set('idle'), 1200)
                 const newSid = response.data.session_id as string
                 if (newSid && newSid !== currentSessionId) {
                     const params = new URLSearchParams(location.search)
@@ -187,10 +184,8 @@ const UserDashboard: React.FC = () => {
                     setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: acc } : m))
                 }
 
-                const mood = classifyEmotionFromText(acc || '')
                 avatarBus.set('talk')
-                setTimeout(() => avatarBus.set(mood), 1200)
-                setTimeout(() => avatarBus.set('idle'), 5200)
+                setTimeout(() => avatarBus.set('idle'), 1200)
                 setPendingFiles([])
                 return
             }
@@ -210,12 +205,23 @@ const UserDashboard: React.FC = () => {
             (async () => {
                 try {
                     const response = await api.get(`/chat/sessions/${sid}/messages`)
-                    const serverMessages: Message[] = (response.data || []).flatMap((m: any) => [
-                        { id: `${m.id}-u`, role: 'user', content: m.message, timestamp: m.timestamp },
-                        { id: `${m.id}-a`, role: 'assistant', content: m.response, timestamp: m.timestamp },
-                    ]).filter((item: Message) => item.content && item.content.trim().length > 0)
-                    setMessages(serverMessages)
-                    setCurrentSessionId(sid)
+                    const serverMessages: Message[] = [];
+                    const initialFeedback: { [messageId: string]: boolean } = {};
+                    (response.data || []).forEach((m: any) => {
+                        if (m.message) {
+                            serverMessages.push({ id: `${m.id}-u`, role: 'user', content: m.message, timestamp: m.timestamp });
+                        }
+                        if (m.response) {
+                            const assistantMessageId = `${m.id}-a`;
+                            serverMessages.push({ id: assistantMessageId, role: 'assistant', content: m.response, timestamp: m.timestamp });
+                            if (m.feedback_rating === 1 || m.feedback_rating === -1) {
+                                initialFeedback[assistantMessageId] = true;
+                            }
+                        }
+                    });
+                    setMessages(serverMessages);
+                    setFeedbackSent(initialFeedback);
+                    setCurrentSessionId(sid);
                 } catch (error) {
                     toast.error('Không thể tải lịch sử chat')
                 }
@@ -242,10 +248,17 @@ const UserDashboard: React.FC = () => {
     }
 
     const handleFeedback = async (messageId: string, rating: 1 | -1) => {
+        const originalId = messageId.replace(/-a$/, '') // Strip suffix for API
         try {
-            await api.post('/feedback/', { chat_message_id: messageId, rating })
+            await api.post('/feedback/', { chat_message_id: originalId, rating })
             setFeedbackSent(prev => ({ ...prev, [messageId]: true }))
             toast.success('Cảm ơn bạn đã đánh giá!')
+            if (rating === 1) {
+                avatarBus.set('yes')
+            } else {
+                avatarBus.set('no')
+            }
+            setTimeout(() => avatarBus.set('idle'), 2500)
         } catch (error) {
             toast.error('Gửi đánh giá thất bại.')
         }
@@ -288,7 +301,7 @@ const UserDashboard: React.FC = () => {
                 {showAssistant && (
                     <div className="hidden lg:block order-2 w-[300px] xl:w-[360px] border-l bg-white dark:bg-[#0d0d0d] dark:border-gray-800">
                         <div className="sticky top-0 p-3">
-                            <div className="px-1 pb-2 text-[11px] font-medium tracking-wide text-gray-500 dark:text-gray-300">Gove Agent</div>
+                            <div className="px-1 pb-2 text-[11px] font-medium tracking-wide text-gray-500 dark:text-gray-300">Agent</div>
                             <div className="h-[380px] xl:h-[460px] w-full overflow-hidden rounded-2xl border border-white/60 bg-white/70 backdrop-blur-sm shadow-sm dark:bg-white/[0.04] dark:border-white/[0.08]">
                                 <Avatar3D modelUrl="/models/AnimatedCharacter.glb" />
                             </div>

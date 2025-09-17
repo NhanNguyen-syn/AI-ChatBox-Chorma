@@ -1,6 +1,0 @@
-syntax = "proto3";
-
-package chroma;
-
-// This is a placeholder service. The garbage collector currently only exposes a health service.
-service GarbageCollector {}

@@ -21,6 +21,7 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
+    full_name = Column(String, nullable=True)
     is_admin = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -119,6 +120,7 @@ class SystemConfig(Base):
     key = Column(String, unique=True, index=True)
     value = Column(Text)
     description = Column(String)
+    updated_by = Column(String, ForeignKey("users.id"), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 

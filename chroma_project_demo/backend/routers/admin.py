@@ -11,7 +11,7 @@ import seaborn as sns
 import io
 import base64
 
-from database import get_db, User, ChatSession, ChatMessage, Document, FAQ, SystemConfig, CrmProduct
+from database import get_db, User, ChatSession, ChatMessage, Document, FAQ, SystemConfig, CrmProduct, Feedback
 from auth.jwt_handler import verify_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -283,15 +283,49 @@ def verify_admin(credentials: HTTPAuthorizationCredentials = Depends(security), 
 
     return user
 
-@router.get("/users", response_model=List[UserResponse])
+class PaginatedUsersResponse(BaseModel):
+    users: List[UserResponse]
+    total: int
+
+
+class FeedbackChatResponse(BaseModel):
+    feedback_id: int
+    chat_message_id: str
+    session_id: str
+    user_question: str
+    assistant_response: str
+    timestamp: datetime
+
+@router.get("/users", response_model=PaginatedUsersResponse)
 async def get_all_users(
     admin: User = Depends(verify_admin),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    page: int = 1,
+    limit: int = 10,
+    role: str = 'all',
+    status: str = 'all'
 ):
-    users = db.query(User).all()
+    query = db.query(User)
+
+    if role == 'admin':
+        query = query.filter(User.is_admin == True)
+    elif role == 'user':
+        query = query.filter(User.is_admin == False)
+
+    if status == 'active':
+        query = query.filter(User.is_active == True)
+    elif status == 'inactive':
+        query = query.filter(User.is_active == False)
+
+    all_matching_users = query.all()
+    total = len(all_matching_users)
+
+    start = (page - 1) * limit
+    end = start + limit
+    paginated_users = all_matching_users[start:end]
 
     result = []
-    for user in users:
+    for user in paginated_users:
         chat_count = db.query(ChatSession).filter(ChatSession.user_id == user.id).count()
         result.append(UserResponse(
             id=user.id,
@@ -304,7 +338,7 @@ async def get_all_users(
             chat_count=chat_count
         ))
 
-    return result
+    return PaginatedUsersResponse(users=result, total=total)
 
 @router.put("/users/{user_id}/toggle")
 async def toggle_user_status(
@@ -315,6 +349,8 @@ async def toggle_user_status(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if user.username == 'admin':
+        raise HTTPException(status_code=403, detail="Không thể thay đổi trạng thái của tài khoản admin gốc")
 
     user.is_active = not bool(getattr(user, 'is_active', True))
     db.commit()
@@ -330,6 +366,8 @@ async def toggle_admin_status(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if user.username == 'admin':
+        raise HTTPException(status_code=403, detail="Không thể thay đổi trạng thái của tài khoản admin gốc")
 
     user.is_admin = not bool(getattr(user, 'is_admin', False))
     db.commit()
@@ -379,6 +417,78 @@ async def get_activity_json(
         func.count(ChatMessage.id).label('count')
     ).group_by(func.date(ChatMessage.timestamp)).order_by(func.date(ChatMessage.timestamp)).all()
     return [{"date": str(row.date), "count": row.count} for row in daily]
+
+
+@router.get("/token-activity")
+async def get_token_activity_json(
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    daily_tokens = db.query(
+        func.date(ChatMessage.timestamp).label('date'),
+        func.sum(ChatMessage.tokens_used).label('tokens')
+    ).group_by(func.date(ChatMessage.timestamp)).order_by(func.date(ChatMessage.timestamp)).all()
+    return [{"date": str(row.date), "tokens": row.tokens or 0} for row in daily_tokens]
+
+
+@router.get("/frequent-questions")
+async def get_frequent_questions(
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db),
+    limit: int = 10
+):
+    """
+    Identifies and returns the most frequently asked user questions.
+    Filters out simple greetings and very short messages.
+    """
+    # Query to get questions, filter out assistant messages, group by content, count, and order
+    frequent_questions = db.query(
+        ChatMessage.content.label('question'),
+        func.count(ChatMessage.content).label('count')
+    ).filter(
+        ChatMessage.role == 'user',
+        func.length(ChatMessage.content) > 15  # Filter out very short messages/greetings
+    ).group_by(
+        ChatMessage.content
+    ).order_by(
+        desc('count')
+    ).limit(limit).all()
+
+    return [{"question": row.question, "count": row.count} for row in frequent_questions]
+
+
+@router.get("/feedback-chats", response_model=List[FeedbackChatResponse])
+async def get_negative_feedback_chats(
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    # Get all negative feedback records, joining with the message to get the session_id
+    negative_feedbacks = db.query(Feedback).filter(Feedback.rating == -1).order_by(Feedback.created_at.desc()).limit(100).all()
+
+    response_data = []
+    for feedback in negative_feedbacks:
+        # Get the assistant message that received the feedback
+        assistant_message = db.query(ChatMessage).filter(ChatMessage.id == feedback.chat_message_id).first()
+        if not assistant_message:
+            continue
+
+        # Find the preceding user message in the same session
+        user_message = db.query(ChatMessage).filter(
+            ChatMessage.session_id == assistant_message.session_id,
+            ChatMessage.role == 'user',
+            ChatMessage.timestamp < assistant_message.timestamp
+        ).order_by(ChatMessage.timestamp.desc()).first()
+
+        response_data.append(FeedbackChatResponse(
+            feedback_id=feedback.id,
+            chat_message_id=assistant_message.id,
+            session_id=assistant_message.session_id,
+            user_question=user_message.content if user_message else "[Không tìm thấy câu hỏi]",
+            assistant_response=assistant_message.content,
+            timestamp=feedback.created_at
+        ))
+
+    return response_data
 
 @router.get("/chat-history")
 async def get_all_chat_history(
@@ -488,6 +598,32 @@ async def delete_faq(
 
     return {"message": "FAQ deleted successfully"}
 
+
+class SuggestedFAQResponse(BaseModel):
+    id: str
+    question: str
+    source_count: int
+
+@router.get("/suggested-faqs", response_model=List[SuggestedFAQResponse])
+async def get_suggested_faqs(
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    # Placeholder implementation. This will be replaced with logic to find
+    # common questions from user chats that are not yet in the FAQ.
+    return []
+
+@router.delete("/suggested-faqs/{faq_id}")
+async def delete_suggested_faq(
+    faq_id: str,
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    # Placeholder implementation. This will be replaced with logic to delete
+    # the suggested FAQ from the database or cache.
+    return {"status": "ok", "message": f"Suggested FAQ {faq_id} deleted."}
+
+
 @router.get("/system-configs")
 async def get_system_configs(
     admin: User = Depends(verify_admin),
@@ -497,31 +633,29 @@ async def get_system_configs(
     return configs
 
 @router.put("/system-configs")
-async def update_system_config(
-    config: SystemConfigUpdate,
+async def update_system_configs(
+    configs: List[SystemConfigUpdate],
     admin: User = Depends(verify_admin),
     db: Session = Depends(get_db)
 ):
-    db_config = db.query(SystemConfig).filter(SystemConfig.key == config.key).first()
-
-    if db_config:
-        db_config.value = config.value
-        db_config.description = config.description
-        db_config.updated_by = admin.id
-        db_config.updated_at = datetime.utcnow()
-    else:
-        db_config = SystemConfig(
-            key=config.key,
-            value=config.value,
-            description=config.description,
-            updated_by=admin.id
-        )
-        db.add(db_config)
+    for config in configs:
+        db_config = db.query(SystemConfig).filter(SystemConfig.key == config.key).first()
+        if db_config:
+            db_config.value = config.value
+            db_config.description = config.description
+            db_config.updated_by = admin.id
+            db_config.updated_at = datetime.utcnow()
+        else:
+            db_config = SystemConfig(
+                key=config.key,
+                value=config.value,
+                description=config.description,
+                updated_by=admin.id
+            )
+            db.add(db_config)
 
     db.commit()
-    db.refresh(db_config)
-
-    return db_config
+    return {"message": "Configs updated successfully"}
 
 # ---------- Excel Upload/List/Delete Endpoints ----------
 from fastapi import UploadFile, File, Form

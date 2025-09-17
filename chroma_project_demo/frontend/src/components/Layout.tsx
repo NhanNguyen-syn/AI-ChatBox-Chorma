@@ -1,17 +1,15 @@
-import React, { useState, useEffect, useCallback } from 'react'
-import { Link, useNavigate, useLocation } from 'react-router-dom'
+import React, { useState, useEffect } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useBranding } from '../contexts/BrandingContext'
-import { api } from '../services/api'
+import { useChatStore } from '../stores/chatStore'
 import {
     MessageSquare,
     Users,
-    Settings,
     BarChart3,
     FileText,
     LogOut,
     User,
-    Shield,
     Sun,
     Moon,
     MoreVertical,
@@ -23,32 +21,17 @@ import {
 
 // Minimal chat sessions list for user sidebar with hover menu "..."
 const ChatSessionsList: React.FC = () => {
-    const [sessions, setSessions] = useState<Array<{ id: string; title?: string; updated_at?: string }>>([])
+    const { sessions, fetchSessions, deleteSession } = useChatStore()
     const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
     const [confirmOpen, setConfirmOpen] = useState(false)
     const [pendingId, setPendingId] = useState<string | null>(null)
     const [deleting, setDeleting] = useState(false)
 
-    const location = useLocation()
     const navigate = useNavigate()
 
-    const load = useCallback(async () => {
-        try {
-            const res = await api.get('/chat/sessions')
-            setSessions(res.data || [])
-        } catch (e) {
-            // silently ignore
-        }
-    }, [])
-
-    useEffect(() => { load() }, [load, location.search])
-
-    // Also refresh immediately when someone dispatches a global refresh event
     useEffect(() => {
-        const handler = () => load()
-        window.addEventListener('chat:sessions:refresh', handler)
-        return () => window.removeEventListener('chat:sessions:refresh', handler)
-    }, [load])
+        fetchSessions()
+    }, [])
 
     const openConfirm = (id: string) => {
         setPendingId(id)
@@ -57,22 +40,16 @@ const ChatSessionsList: React.FC = () => {
     }
     const closeConfirm = () => { if (!deleting) { setConfirmOpen(false); setPendingId(null) } }
 
-    const deleteSession = async (sessionId: string) => {
+    const handleDelete = async (sessionId: string) => {
         try {
             setDeleting(true)
-            await api.delete(`/chat/sessions/${sessionId}`)
-            setSessions(prev => prev.filter(s => s.id !== sessionId))
+            await deleteSession(sessionId)
+
             // If current URL points to this sid, navigate to new chat
             const params = new URLSearchParams(window.location.search)
             if (params.get('sid') === sessionId) {
                 navigate('/dashboard', { replace: true })
-                // notify chat page to clear
-                window.dispatchEvent(new Event('chat:sessions:refresh'))
-            } else {
-                window.dispatchEvent(new Event('chat:sessions:refresh'))
             }
-        } catch (e) {
-            // ignore here; History page will show toasts
         } finally {
             setDeleting(false)
             setConfirmOpen(false)
@@ -136,7 +113,7 @@ const ChatSessionsList: React.FC = () => {
                         </div>
                         <div className="mt-5 flex justify-end gap-3">
                             <button onClick={closeConfirm} disabled={deleting} className="px-4 py-2 rounded border bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50">Hủy</button>
-                            <button onClick={() => pendingId && deleteSession(pendingId)} disabled={deleting} className="px-4 py-2 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
+                            <button onClick={() => pendingId && handleDelete(pendingId)} disabled={deleting} className="px-4 py-2 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
                                 {deleting ? 'Đang xóa...' : 'Xóa'}
                             </button>
                         </div>

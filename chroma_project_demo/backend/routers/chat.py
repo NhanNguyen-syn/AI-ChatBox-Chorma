@@ -383,7 +383,7 @@ You are an expert Text-to-SQL assistant. Your task is to convert a user's questi
     """
     try:
         res = openai_client.chat.completions.create(
-            model=_cfg_chat_model(OPENAI_CHAT_MODEL),
+            model=_cfg_chat_model(),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=min(300, _cfg_max_tokens(300)),
@@ -479,7 +479,7 @@ You are a research assistant. Your task is to answer the user's question based *
 """
     try:
         res = openai_client.chat.completions.create(
-            model=_cfg_chat_model(OPENAI_CHAT_MODEL),
+            model=_cfg_chat_model(),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=min(500, _cfg_max_tokens(500)),
@@ -532,7 +532,7 @@ Based on the user's question, which tool should be used?
 
     try:
         # Use a separate LangChain client for this structured output task
-        lc_chat = LangchainChatOpenAI(model=_cfg_chat_model(OPENAI_CHAT_MODEL), temperature=0, openai_api_key=OPENAI_API_KEY)
+        lc_chat = LangchainChatOpenAI(model=_cfg_chat_model(), temperature=0, openai_api_key=OPENAI_API_KEY)
         structured_llm = lc_chat.with_structured_output(ToolChoice)
 
         prompt = ChatPromptTemplate.from_template(prompt_template)
@@ -849,7 +849,7 @@ def _suggest_chat_title(user_text: str, ai_text: str = "") -> str:
                 f"User: {user_text}\nAssistant: {ai_text[:200]}"
             )
             res = openai_client.chat.completions.create(
-                model=_cfg_chat_model(OPENAI_CHAT_MODEL),
+                model=_cfg_chat_model(),
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=min(24, _cfg_max_tokens(24)),
@@ -892,7 +892,7 @@ def _update_session_summary(db: Session, session: ChatSession, history: list[dic
             f"Hội thoại:\n{transcript}\n\nTóm tắt:"
         )
         res = openai_client.chat.completions.create(
-            model=_cfg_chat_model(OPENAI_CHAT_MODEL),
+            model=_cfg_chat_model(),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=min(220, _cfg_max_tokens(220)),
@@ -917,7 +917,7 @@ def _suggest_followups(user_msg: str, ai_text: str) -> list[str]:
             f"Câu hỏi: {user_msg}\nCâu trả lời: {ai_text}\nKết quả:"
         )
         res = openai_client.chat.completions.create(
-            model=_cfg_chat_model(OPENAI_CHAT_MODEL),
+            model=_cfg_chat_model(),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.4,
             max_tokens=min(120, _cfg_max_tokens(120)),
@@ -1151,7 +1151,7 @@ def get_ai_response(
             msgs.append({"role": "user", "content": user_prompt})
 
             resp = openai_client.chat.completions.create(
-                model=_cfg_chat_model(OPENAI_CHAT_MODEL), messages=msgs, temperature=0.2 if brief else 0.4, max_tokens=_cfg_max_tokens(800))
+                model=_cfg_chat_model(), messages=msgs, temperature=0.2 if brief else 0.4, max_tokens=_cfg_max_tokens(800))
             text = (resp.choices[0].message.content or "").strip()
             usage = getattr(resp, 'usage', None)
             tokens = usage.total_tokens if usage and hasattr(usage, 'total_tokens') else 0
@@ -1169,7 +1169,7 @@ def get_ai_response(
                         synthesis_prompt = f"Dựa trên câu hỏi gốc và kết quả tính toán, hãy đưa ra câu trả lời tự nhiên.\nCâu hỏi: '{message}'\nKết quả: '{calc_result}'\nCâu trả lời:"
 
                         final_resp = openai_client.chat.completions.create(
-                            model=OPENAI_CHAT_MODEL, messages=[{"role": "user", "content": synthesis_prompt}], temperature=0.1, max_tokens=200)
+                            model=_cfg_chat_model(), messages=[{"role": "user", "content": synthesis_prompt}], temperature=0.1, max_tokens=200)
                         final_text = (final_resp.choices[0].message.content or "").strip()
 
                         final_usage = getattr(final_resp, 'usage', None)
@@ -1326,7 +1326,7 @@ def _encode_query(text: str):
     # Ưu tiên sử dụng OpenAI embeddings (tốt nhất cho tiếng Việt)
     if USE_OPENAI and openai_client:
         try:
-            resp = openai_client.embeddings.create(model=_cfg_embed_model(OPENAI_EMBED_MODEL), input=text)
+            resp = openai_client.embeddings.create(model=_cfg_embed_model(), input=text)
             return resp.data[0].embedding
         except Exception as e:
             print(f"[Chat] OpenAI embedding failed: {e}")
@@ -1557,7 +1557,7 @@ def get_context_with_sources(queries: list[str], collections: list[Any]) -> tupl
     try:
         # 1. Generate embeddings for the queries
         if USE_OPENAI and openai_client:
-            res = openai_client.embeddings.create(model=_cfg_embed_model(OPENAI_EMBED_MODEL), input=queries)
+            res = openai_client.embeddings.create(model=_cfg_embed_model(), input=queries)
             query_embeddings = [r.embedding for r in res.data]
         elif _st_model:
             query_embeddings = [e.tolist() for e in _st_model.encode(queries)]
@@ -2204,7 +2204,7 @@ async def upload_context_file(
                 backend = "openai" if (USE_OPENAI and openai_client) else "ollama"
                 if USE_OPENAI and openai_client:
                     for t in texts:
-                        resp = openai_client.embeddings.create(model=_cfg_embed_model(OPENAI_EMBED_MODEL), input=t)
+                        resp = openai_client.embeddings.create(model=_cfg_embed_model(), input=t)
                         chunk_embeddings.append(resp.data[0].embedding)
                 else:
                     raise Exception("No primary embeddings backend is available for user indexing")

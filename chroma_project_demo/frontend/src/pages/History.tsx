@@ -1,31 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { api } from '../services/api'
-import toast from 'react-hot-toast'
 import { Trash2, RefreshCcw, MessageSquare, AlertTriangle, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-
-interface Session {
-  id: string
-  title: string
-  created_at: string
-  updated_at: string
-}
-
-interface ChatMessageItem {
-  id: string
-  message: string
-  response: string
-  timestamp: string
-  session_id: string
-}
+import { useChatStore, Session } from '../stores/chatStore'
+import { useMessages } from '../hooks/useMessages'
 
 const History: React.FC = () => {
-  const [sessions, setSessions] = useState<Session[]>([])
+  const { sessions, fetchSessions, deleteSession, sessionPage, setSessionPage, sessionTotal } = useChatStore()
+  const SESSIONS_PER_PAGE = 15; // Should match the store
+
   const [selected, setSelected] = useState<Session | null>(null)
-  const [messages, setMessages] = useState<ChatMessageItem[]>([])
+  const { messages, loading: loadingMsgs } = useMessages(selected?.id ?? null)
+
   const [loading, setLoading] = useState<boolean>(true)
-  const [loadingMsgs, setLoadingMsgs] = useState<boolean>(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -46,6 +33,7 @@ const History: React.FC = () => {
     try {
       setDeleting(true)
       await deleteSession(pendingId)
+      // View clearing is now handled by the useEffect below
     } finally {
       setDeleting(false)
       setConfirmOpen(false)
@@ -53,76 +41,26 @@ const History: React.FC = () => {
     }
   }
 
-
   const loadSessions = async () => {
     setLoading(true)
-    try {
-      const res = await api.get('/chat/sessions')
-      const list = res.data || []
-      setSessions(list)
-      // Keep current selection if still exists; otherwise pick first
-      if (selected) {
-        const still = list.find((x: any) => x.id === selected.id)
-        if (still) {
-          // refresh messages for the same session
-          await pickSession(still)
-        } else if (list.length > 0) {
-          await pickSession(list[0])
-        } else {
-          setSelected(null)
-          setMessages([])
-        }
-      } else if (list.length > 0) {
-        await pickSession(list[0])
-      }
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Không thể tải lịch sử chat')
-    } finally {
-      setLoading(false)
-    }
+    await fetchSessions()
+    setLoading(false)
   }
 
-  const deleteSession = async (sessionId: string) => {
-    try {
-      await api.delete(`/chat/sessions/${sessionId}`)
-      toast.success('Đã xóa phiên chat')
-      // Nếu đang xem phiên này thì clear panel bên phải
-      if (selected?.id === sessionId) {
-        setSelected(null)
-        setMessages([])
-      }
-      // Cập nhật danh sách
-      setSessions(prev => prev.filter(s => s.id !== sessionId))
-      // Thông báo cho các khu vực khác (sidebar/chat) làm mới
-      window.dispatchEvent(new Event('chat:sessions:refresh'))
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Không thể xóa phiên chat')
-    }
-  }
-
-  const pickSession = async (s: Session) => {
-    setSelected(s)
-    setLoadingMsgs(true)
-    try {
-      const res = await api.get(`/chat/sessions/${s.id}/messages`)
-      setMessages(res.data || [])
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Không thể tải tin nhắn')
-    } finally {
-      setLoadingMsgs(false)
-    }
-  }
-
+  // Fetch sessions on page change
   useEffect(() => {
     loadSessions()
-  }, [])
+  }, [sessionPage])
 
-  // Refresh when other parts (sidebar/chat) broadcast changes
+  // Auto-select first session when the list is loaded, or clear view if selected is deleted
   useEffect(() => {
-    const h = () => loadSessions()
-    window.addEventListener('chat:sessions:refresh', h)
-    return () => window.removeEventListener('chat:sessions:refresh', h)
-  }, [])
+    if (sessions.length > 0 && !sessions.find(s => s.id === selected?.id)) {
+      setSelected(sessions[0])
+    }
+    if (selected && !sessions.find(s => s.id === selected.id)) {
+      setSelected(null)
+    }
+  }, [sessions])
 
   const [query, setQuery] = useState('')
   const filtered = useMemo(() => {
@@ -165,7 +103,7 @@ const History: React.FC = () => {
               {filtered.map((s) => (
                 <li key={s.id} className={`py-3 ${selected?.id === s.id ? 'bg-primary-50 dark:bg-primary-500/10 rounded-md' : ''}`}>
                   <div className="flex items-center gap-3">
-                    <div className="flex-1 min-w-0 cursor-pointer" onClick={() => pickSession(s)}>
+                    <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setSelected(s)}>
                       <div className="font-medium text-gray-800 dark:text-gray-100 truncate" title={s.title}>{s.title || 'Phiên chat'}</div>
                       <div className="text-xs text-gray-500">Cập nhật: {new Date(s.updated_at).toLocaleString()}</div>
                     </div>
@@ -181,6 +119,30 @@ const History: React.FC = () => {
                 </li>
               ))}
             </ul>
+          )}
+          {/* Pagination */}
+          {sessionTotal > SESSIONS_PER_PAGE && (
+            <div className="flex items-center justify-between pt-3 mt-3 border-t border-gray-100 dark:border-zinc-800">
+              <span className="text-sm text-gray-600 dark:text-gray-400">
+                Trang {sessionPage}
+              </span>
+              <div className="space-x-2">
+                <button
+                  onClick={() => setSessionPage(sessionPage - 1)}
+                  disabled={sessionPage === 1}
+                  className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed text-xs px-2 py-1"
+                >
+                  Trước
+                </button>
+                <button
+                  onClick={() => setSessionPage(sessionPage + 1)}
+                  disabled={sessionPage * SESSIONS_PER_PAGE >= sessionTotal}
+                  className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed text-xs px-2 py-1"
+                >
+                  Sau
+                </button>
+              </div>
+            </div>
           )}
         </div>
 
