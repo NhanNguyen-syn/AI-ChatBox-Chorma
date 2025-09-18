@@ -443,13 +443,13 @@ async def get_frequent_questions(
     """
     # Query to get questions, filter out assistant messages, group by content, count, and order
     frequent_questions = db.query(
-        ChatMessage.content.label('question'),
-        func.count(ChatMessage.content).label('count')
+        ChatMessage.message.label('question'),
+        func.count(ChatMessage.message).label('count')
     ).filter(
-        ChatMessage.role == 'user',
-        func.length(ChatMessage.content) > 15  # Filter out very short messages/greetings
+        ChatMessage.is_user == True,
+        func.length(ChatMessage.message) > 15  # Filter out very short messages/greetings
     ).group_by(
-        ChatMessage.content
+        ChatMessage.message
     ).order_by(
         desc('count')
     ).limit(limit).all()
