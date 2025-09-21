@@ -55,6 +55,11 @@
     @apply bg-secondary-100 hover:bg-secondary-200 text-secondary-700 border border-secondary-200 font-medium py-2 px-4 rounded-lg transition-colors;
   }
 
+  /* Compact secondary button */
+  .btn-secondary-sm {
+    @apply bg-secondary-100 hover:bg-secondary-200 text-secondary-700 border border-secondary-200 font-medium text-sm py-1.5 px-3 rounded-lg transition-colors;
+  }
+
   .bubble-user {
 
     /* Animation Utilities */
@@ -88,12 +93,13 @@
       animation: fadeInUp 0.6s ease-out forwards;
     }
 
-    @apply text-white rounded-xl px-4 py-2 shadow break-words;
+    /* More compact bubble */
+    @apply text-white text-sm rounded-lg px-3 py-1.5 shadow break-words leading-5;
     background-color: #308748;
   }
 
   .bubble-ai {
-    @apply bg-white text-gray-900 rounded-xl px-4 py-2 border border-gray-200 shadow-sm break-words dark:bg-[#111111] dark:text-gray-100 dark:border-gray-800;
+    @apply bg-white text-gray-900 text-sm rounded-lg px-3 py-1.5 border border-gray-200 shadow-sm break-words leading-5 dark:bg-[#111111] dark:text-gray-100 dark:border-gray-800;
   }
 
   .btn-send {
@@ -109,8 +115,12 @@
     box-shadow: 0 0 0 2px #30874833;
   }
 
+  /* Smaller send button for compact UI */
   .btn-send-lg {
-    @apply h-14 w-14 rounded-full flex items-center justify-center;
+    @apply h-11 w-11 rounded-full flex items-center justify-center;
+  }
+  .btn-send-sm {
+    @apply h-10 w-10 rounded-full flex items-center justify-center;
   }
 
 
@@ -134,5 +144,44 @@
   progress {
     accent-color: var(--color-primary-600, #16A34A);
   }
+
+
+  /* Brand accent bar under header */
+  .brand-accent-bar {
+    height: 3px;
+    background-image: repeating-linear-gradient(
+      90deg,
+      var(--brand-accent-a, #308748) 0 56px,
+      var(--brand-accent-b, #f6a645) 56px 112px
+    );
+  }
+
+  /* Ghost button for subtle actions */
+  .btn-ghost {
+    @apply px-3 py-1 rounded-md border text-sm text-gray-700 hover:bg-gray-50 dark:text-gray-200 dark:border-gray-700 dark:hover:bg-gray-800;
+  }
+
+  /* Danger button */
+  .btn-danger {
+    @apply bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg transition-colors;
+  }
+
+  /* Badges */
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold;
+  }
+  .badge-success {
+    @apply bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300;
+  }
+  .badge-danger {
+    @apply bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300;
+  }
+  .badge-neutral {
+    @apply bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200;
+  }
+  .badge-purple {
+    @apply bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300;
+  }
+
 
 }

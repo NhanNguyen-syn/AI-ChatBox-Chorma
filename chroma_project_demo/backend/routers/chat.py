@@ -1,6 +1,6 @@
 import uuid
 import os
-import uuid
+
 import base64
 import json
 from datetime import datetime, timezone
@@ -8,12 +8,14 @@ from typing import List
 
 
 from typing import List, Optional, Any
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+import re
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.llms import Ollama
 from typing import Optional, List
@@ -24,6 +26,8 @@ from io import StringIO
 
 from PIL import Image
 from services.ocr_utils import ocr_with_confidence, preprocess_image
+from services.security import validate_meta, antivirus_scan_bytes  # upload security
+from services.storage import save_bytes, S3_ENABLED  # cloud/local storage
 
 from typing import TypedDict, Literal, Any as _Any
 
@@ -68,6 +72,7 @@ except Exception as e:
     print(f"[Chat] sentence-transformers not available for reranking: {e}")
     rerank_model = None
 import os
+import difflib as _difflib
 
 # Provider selection flags
 USE_OPENAI = os.getenv("USE_OPENAI", "0") == "1"
@@ -175,23 +180,23 @@ except Exception:
 
 from typing import List
 
-from database import get_db, ChatSession, ChatMessage, User, get_chroma_collection, get_all_chroma_collections, get_chroma_collection_for_backend, CrmProduct, OcrText, AllowanceTable, ExcelRow, engine, TemporaryContext
+from database import get_db, ChatSession, ChatMessage, User, get_chroma_collection, get_all_chroma_collections, get_chroma_collection_for_backend, CrmProduct, OcrText, AllowanceTable, ExcelRow, engine, TemporaryContext, FAQ, TokenUsage
 from auth.jwt_handler import verify_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-# Import Gemini service
-try:
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-    from services.gemini_service import get_gemini_service
-    GEMINI_AVAILABLE = True
-    print("[Chat] Gemini service imported successfully")
-except Exception as e:
-    print(f"[Chat] Gemini service not available: {e}")
-    GEMINI_AVAILABLE = False
+# Gemini service: avoid import-time errors; load lazily only when needed
+GEMINI_AVAILABLE = False
+
+def _get_gemini_service_safe():
+    try:
+        from services.gemini_service import get_gemini_service  # lazy import
+        return get_gemini_service()
+    except Exception as e:
+        print(f"[Chat] Gemini service not available: {e}")
+        return None
 
 from services.cache import qa_cache_get, qa_cache_set
+from services.llm_provider import get_chat_response
 router = APIRouter()
 security = HTTPBearer()
 
@@ -202,7 +207,32 @@ def verify_user(credentials: HTTPAuthorizationCredentials = Depends(security), d
     user = db.query(User).filter(User.username == payload["sub"]).first()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="Invalid user")
+
+    # Check token quota
+    if user.token_quota is not None:
+        from datetime import datetime, timedelta
+        from sqlalchemy import func
+
+        start_of_month = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        total_usage = db.query(func.sum(TokenUsage.tokens_used)).filter(
+            TokenUsage.user_id == user.id,
+            TokenUsage.timestamp >= start_of_month
+        ).scalar()
+
+        if total_usage is not None and total_usage >= user.token_quota:
+            raise HTTPException(status_code=429, detail="Token quota exceeded for this month")
+
     return user
+
+# For specific testing account(s) we don't want to persist chat history
+# Requirement: "Riêng tài khoản của admin chỉ cần test chat không cần lưu lịch sử"
+# Apply to username exactly "admin".
+
+def _is_ephemeral_history_user(user: User) -> bool:
+    try:
+        return (user is not None) and (getattr(user, "username", "") == "admin")
+    except Exception:
+        return False
 
 # Pydantic models
 class ChatMessageRequest(BaseModel):
@@ -223,6 +253,10 @@ class ChatSessionResponse(BaseModel):
     title: str
     created_at: datetime
     updated_at: datetime
+
+class PaginatedSessions(BaseModel):
+    sessions: List[ChatSessionResponse]
+    total: int
 
 # Initialize models
 try:
@@ -253,12 +287,50 @@ except Exception as e:
     llm = None
 
 import unicodedata
+import string
 
 def _normalize_vi(s: str) -> str:
     try:
-        return unicodedata.normalize('NFD', (s or '')).encode('ascii', 'ignore').decode('ascii').lower().strip()
+        # Remove all punctuation using str.translate
+        s_no_punct = (s or "").translate(str.maketrans("", "", string.punctuation))
+        # Normalize, encode to ascii (removing accents), decode, and strip whitespace
+        return unicodedata.normalize('NFD', s_no_punct).encode('ascii', 'ignore').decode('ascii').lower().strip()
     except Exception:
-        return (s or '').lower().strip()
+        # Fallback in case of errors, still try to remove punctuation
+        return (s or "").lower().strip().translate(str.maketrans("", "", string.punctuation))
+
+# --- Simple FAQ matcher (exact/fuzzy) ---
+
+def _best_faq_match(db: Session, question: str) -> tuple[str | None, dict | None]:
+    """Return (answer, source) if user's question closely matches an active FAQ.
+    Uses accent-insensitive fuzzy ratio with difflib. Threshold defaults to 0.9.
+    """
+    try:
+        qn = _normalize_vi(question)
+        print(f"[FAQ Matcher] Normalized User Question: '{qn}'")
+        faqs = db.query(FAQ).filter(FAQ.is_active == True).all()
+        best = (0.0, None)
+        for f in faqs:
+            fq = _normalize_vi(f.question or "")
+            if not fq:
+                continue
+            ratio = _difflib.SequenceMatcher(None, qn, fq).ratio()
+            print(f"[FAQ Matcher] Comparing with FAQ (ID: {f.id}): '{fq}' -> Ratio: {ratio:.4f}")
+            # quick exact and substring checks first
+            if qn == fq or (len(qn) >= 8 and (qn in fq or fq in qn)):
+                print(f"[FAQ Matcher] Found exact/substring match with FAQ ID: {f.id}")
+                return (f.answer or "", {"title": "FAQ", "id": f.id})
+            if ratio > best[0]:
+                best = (ratio, f)
+        if best[0] >= 0.85 and best[1] is not None:
+            f = best[1]
+            print(f"[FAQ Matcher] Found best fuzzy match with FAQ ID: {f.id} (Ratio: {best[0]:.4f})")
+            return (f.answer or "", {"title": "FAQ", "id": f.id})
+        print("[FAQ Matcher] No suitable FAQ found.")
+        return (None, None)
+    except Exception as _e:
+        print(f"[Chat] FAQ match failed: {_e}")
+        return (None, None)
 
 def _is_greeting(msg: str) -> bool:
     s = (msg or "").strip()
@@ -295,6 +367,23 @@ def _requires_internal_docs(msg: str) -> bool:
         'catalog', 'danh muc', 'menu', 'bang gia'
     ]
     return any(kw in n for kw in internal_keywords)
+
+def _should_try_web_search(msg: str) -> bool:
+    """Decide if a query is suitable for a web search fallback."""
+    if not msg or not isinstance(msg, str):
+        return False
+    # If it requires internal docs, don't web search
+    if _requires_internal_docs(msg):
+        return False
+    # If it's a greeting, don't web search
+    if _is_greeting(msg):
+        return False
+    # Simple heuristic: if it contains question words and doesn't seem internal, try web search.
+    q_norm = _normalize_vi(msg)
+    question_words = ["la gi", "khi nao", "o dau", "tai sao", "nhu the nao", "what is", "when is", "where is", "why is", "how to"]
+    if any(qw in q_norm for qw in question_words):
+        return True
+    return False
 
 
 # --- Text-to-SQL Agent Components ---
@@ -430,6 +519,20 @@ except Exception as e:
     _DDG_AVAILABLE = False
 import asyncio
 
+# Streaming and retry configuration
+try:
+    STREAM_TIMEOUT_SECONDS = max(15, int(os.getenv("STREAM_TIMEOUT_SECONDS", "60")))
+except Exception:
+    STREAM_TIMEOUT_SECONDS = 60
+try:
+    RETRY_MAX_ATTEMPTS = max(1, int(os.getenv("RETRY_MAX_ATTEMPTS", "3")))
+except Exception:
+    RETRY_MAX_ATTEMPTS = 3
+try:
+    RETRY_BASE_DELAY = max(0.2, float(os.getenv("RETRY_BASE_DELAY", "0.8")))
+except Exception:
+    RETRY_BASE_DELAY = 0.8
+
 
 async def _get_search_results(query: str, num_results: int = 3) -> str:
     """Performs a web search and returns a concatenated string of snippets."""
@@ -494,7 +597,7 @@ You are a research assistant. Your task is to answer the user's question based *
 
 # --- Tool Router & Orchestrator ---
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI as LangchainChatOpenAI # Alias to avoid conflict with our own client
 from typing import Literal
 
@@ -538,7 +641,7 @@ Based on the user's question, which tool should be used?
         prompt = ChatPromptTemplate.from_template(prompt_template)
         chain = prompt | structured_llm
 
-        result = await chain.ainvoke({{"user_query": user_query}})
+        result = await chain.ainvoke({"user_query": user_query})
         print(f"[Router] Decision: {result.tool_name}")
         return result.tool_name
     except Exception as e:
@@ -657,7 +760,7 @@ def find_ocr_sql_context(db: Session, user_query: str, limit: int = 5) -> tuple[
             match = " OR ".join([f'"{k}"' for k in keys if k])
             sql = sql_text("""
                 SELECT o.id FROM ocr_texts o
-                JOIN ocr_texts_fts f ON f.rowid = o.rowid
+                JOIN ocr_texts_fts f ON f.id = o.id
                 WHERE f.normalized_content MATCH :match
                 LIMIT :lim
             """)
@@ -713,6 +816,36 @@ def find_ocr_sql_context(db: Session, user_query: str, limit: int = 5) -> tuple[
     except Exception as e:
         print(f"[Chat] OCR SQL search failed: {e}")
         return "", []
+
+# Region keywords used to filter AllowanceTable by khu_vuc
+_all_region_keywords = [
+    "TP.HCM", "HCM", "TP HCM", "Hồ Chí Minh", "Ho Chi Minh",
+    "Hà Nội", "Ha Noi",
+    "Đà Lạt", "Da Lat",
+    "Cần Thơ", "Can Tho",
+    "Lâm Đồng", "Lam Dong",
+    "Đơn Dương", "Don Duong",
+    "Long An",
+    "Quảng Nam", "Quang Nam",
+    "Đà Nẵng", "Da Nang",
+]
+
+
+def _format_vnd(val) -> str:
+    try:
+        if val is None:
+            return "N/A"
+        if isinstance(val, str) and not val.strip():
+            return "N/A"
+        n = int(val)
+        s = f"{n:,.0f}"
+        # Use dot as thousands separator common in VN
+        return s.replace(",", ".")
+    except Exception:
+        try:
+            return str(val)
+        except Exception:
+            return "N/A"
 
 # ------- Allowance Table SQL retrieval helpers -------
 
@@ -965,361 +1098,11 @@ def _rerank_and_prune_context(query: str, context: str, sources: list[dict]) -> 
         print(f"[Chat] Reranking failed: {e}")
         return context, sources
 
-def _execute_table_calculation(table_md: str, operation: str, column: str) -> str:
-    """
-    Parses a Markdown table and performs a simple calculation on a specified column.
-    Returns the result as a formatted string.
-    """
-    try:
-        # Convert Markdown table to a DataFrame
-        lines = [line.strip() for line in table_md.strip().split('\n')]
-        if len(lines) < 2: return "Lỗi: Bảng không hợp lệ."
-
-        # Clean lines by removing leading/trailing pipes
-        cleaned_lines = [re.sub(r'^\s*\|\s*|\s*\|\s*$', '', line) for line in lines]
-        header_line = cleaned_lines[0]
-        separator_line = cleaned_lines[1]
-        data_lines = cleaned_lines[2:]
-
-        # Check for separator line validity
-        if not re.match(r'^[\|\s:-]+$', separator_line):
-            return "Lỗi: Dòng phân tách của bảng Markdown không hợp lệ."
-
-        # Use StringIO to simulate reading a CSV, splitting by pipe
-        csv_data = "\n".join([header_line] + data_lines)
-        df = pd.read_csv(StringIO(csv_data), sep='|', skipinitialspace=True)
-
-        # Clean up column names and data
-        df.columns = [col.strip() for col in df.columns]
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                df[col] = df[col].str.strip()
-
-        # Find the target column, allowing for partial matches
-        target_col = None
-        for col_name in df.columns:
-            if column.strip().lower() in col_name.lower():
-                target_col = col_name
-                break
-        if not target_col:
-            return f"Lỗi: Không tìm thấy cột '{column}'. Các cột có sẵn: {', '.join(df.columns)}"
-
-        # Convert column to numeric, coercing errors
-        numeric_series = pd.to_numeric(df[target_col], errors='coerce').dropna()
-        if numeric_series.empty:
-            return f"Lỗi: Cột '{target_col}' không chứa dữ liệu số hợp lệ."
-
-        # Perform operation
-        result = None
-        op = operation.upper()
-        if op == "SUM":
-            result = numeric_series.sum()
-        elif op == "AVG":
-            result = numeric_series.mean()
-        elif op == "MAX":
-            result = numeric_series.max()
-        elif op == "MIN":
-            result = numeric_series.min()
-        else:
-            return f"Lỗi: Phép tính '{operation}' không được hỗ trợ."
-
-        return f"{result:,.2f}" # Format with commas and 2 decimal places
-
-    except Exception as e:
-        print(f"[TableCalc] Error executing calculation: {e}")
-        return f"Lỗi khi xử lý bảng: {e}"
-
-def get_ai_response(
-    message: str,
-    context: str = "",
-    history: list[dict] | None = None,
-    intent: str = "SIMPLE_QA",
-    session: Optional[ChatSession] = None
-) -> tuple[str, int, int]:
-    """Return (response_text, tokens_used, response_time_ms)."""
-    start = time.time()
-
-    def _looks_like_ack(msg: str) -> bool:
-        m = (msg or "").strip().lower()
-        return m in {"ok", "oke", "okay", "dạ", "vâng", "uhm", "ừ", "ờ", "được", "okie", "okiee", "yes"}
-
-    def _looks_like_too_generic(msg: str) -> bool:
-        m = (msg or "").strip().lower()
-        if len(m) <= 2: return True
-        generic_patterns = ["đây là gì", "cái này là gì", "là gì", "what is this", "this is?"]
-        return any(p in m for p in generic_patterns)
-
-    def _wants_brief(msg: str) -> bool:
-        m = (msg or "").strip().lower()
-        brief_phrases = ["nói ngắn gọn", "ngắn gọn", "tóm gọn", "tóm tắt", "summary", "brief"]
-        return any(p in m for p in brief_phrases)
-
-    if (not context or not context.strip()) and (_looks_like_ack(message) or _looks_like_too_generic(message)):
-        return ("Xin lỗi, tôi không chắc về thông tin này", 0, int((time.time() - start) * 1000))
-
-    # Fast QA cache lookup
-    try:
-        cached = qa_cache_get(message, context)
-        if cached and isinstance(cached, dict) and cached.get("text"):
-            return str(cached.get("text")), 0, int((time.time() - start) * 1000)
-    except Exception:
-        pass
-
-    try:
-        parsed = parse_allowance_table(context)
-        exact = try_answer_allowance_question(message, parsed)
-        if exact:
-            try:
-                qa_cache_set(message, context, {"text": exact, "intent": intent})
-            except Exception:
-                pass
-            return exact, 0, int((time.time() - start) * 1000)
-    except Exception as _pe:
-        dlog(f"[Chat] allowance parser skipped: {_pe}")
-
-    try:
-        if USE_OPENAI and openai_client:
-            brief = _wants_brief(message)
-            # Dynamic System Prompt selection logic here...
-            # Chính sách chung của DalatHasfarm (base policy)
-            base_policy = (
-                "Bạn là trợ lý AI nội bộ của DalatHasfarm, được xây dựng để hỗ trợ nhân viên và quản lý tra cứu dữ liệu, truy cập thông tin nội bộ, và giải đáp chính xác các vấn đề nghiệp vụ, nhằm nâng cao hiệu quả công việc và tối ưu hóa quy trình vận hành.\n\n"
-                "**QUY TẮC BẮT BUỘC:**\n\n"
-                "1. **NGUỒN DỮ LIỆU DUY NHẤT:** Chỉ sử dụng thông tin từ cơ sở dữ liệu nội bộ DalatHasfarm (bao gồm: tài liệu PDF, file Excel, báo cáo, chính sách, quy định, hướng dẫn quy trình đã được tải lên hệ thống).\n\n"
-                "2. **XÁC THỰC TRƯỚC KHI TRẢ LỜI:**\n"
-                "   - Nếu tìm thấy thông tin: Mở đầu bằng MỘT trong các mẫu sau (chọn 1, phù hợp ngữ cảnh):\n"
-                "     • \"Dựa trên tài liệu nội bộ của DalatHasfarm, ...\"\n"
-                "     • \"Theo tài liệu nội bộ DalatHasfarm, ...\"\n"
-                "     • \"Căn cứ vào tài liệu nội bộ đã cung cấp, ...\"\n"
-                "     • \"Từ các tài liệu nội bộ hiện có, ...\"\n"
-                "     • \"Dựa trên dữ liệu nội bộ (Excel/PDF) của DalatHasfarm, ...\"\n"
-                "     • \"Theo dữ liệu trong file PDF/Excel của DalatHasfarm, ...\"\n"
-                "     • \"Tôi muốn kiểm tra thông tin, ...\"\n"
-                "     • \"Kết quả trả lời dựa trên thông tin nội bộ đã tải lên, ...\"\n"
-                "     • \"Căn cứ vào dữ liệu quản trị nội bộ của DalatHasfarm, ...\"\n"
-                "     • \"Theo hồ sơ nội bộ DalatHasfarm, ...\"\n"
-                "     • \"Căn cứ trên dữ liệu quản lý nội bộ, ...\"\n"
-                "     • \"Cho tôi thông tin, ...\"\n"
-                "   - Nếu là câu hỏi tiếp theo (follow‑up) trong cùng chủ đề và cùng nguồn ngữ cảnh (ví dụ: người dùng dùng \"tiếp theo\", \"vậy còn\", \"còn ở\", \"thế còn\"; hoặc tham chiếu kết quả trước):\n"
-                "     • Có thể lược bỏ câu mở đầu dài, trả lời ngắn gọn trực tiếp nhưng VẪN trích dẫn nguồn ở cuối.\n"
-                "   - Nếu không tìm thấy: Trả lời chính xác \"Xin lỗi, tôi không tìm thấy thông tin này trong tài liệu nội bộ của DalatHasfarm. Vui lòng liên hệ bộ phận liên quan để được hỗ trợ trực tiếp.\"\n\n"
-                "3. **CẤM TUYỆT ĐỐI:**\n"
-                "   - Không bịa đặt, suy đoán, hoặc tạo ra thông tin không có trong dữ liệu\n"
-                "   - Không sử dụng kiến thức bên ngoài về DalatHasfarm từ internet.\n"
-                "   - Không đưa ra khuyến nghị cá nhân vượt quá phạm vi tài liệu.\n"
-                "   - Không tự động tổng quát hóa thông tin khi dữ liệu chỉ áp dụng cho một trường hợp cụ thể.\n"
-                "   - Không đưa ra khuyến nghị cá nhân vượt quá phạm vi tài liệu.\n\n"
-                "4. **ĐỊNH DẠNG TRẢ LỜI:**\n"
-                "   - Trả lời ngắn gọn, súc tích, đúng trọng tâm\n"
-                "   - Sử dụng ngôn ngữ chuyên nghiệp nhưng thân thiện\n"
-                "   - Nếu dữ liệu là danh sách, dùng bullet point để trình bày rõ ràng"
-                "   - Khi trích xuất từ bảng dữ liệu, giữ nguyên định dạng bảng Markdown\n\n"
-                "5. **XỬ LÝ CÂU HỎI PHỨC TẠP:**\n"
-                "   - Nếu câu hỏi yêu cầu thông tin từ nhiều tài liệu, tổng hợp một cách logic và rõ ràng\n"
-                "   - Nếu có mâu thuẫn giữa các tài liệu, nêu rõ và ưu tiên tài liệu mới nhất\n"
-                "   - Đối với số liệu, luôn trích xuất chính xác từ nguồn gốc\n\n"
-                "6. **PHẠM VI HỖ TRỢ:** Chỉ trả lời các câu hỏi liên quan đến hoạt động nội bộ DalatHasfarm như: chính sách nhân sự, quy định công ty, quy trình làm việc, thông tin sản phẩm, báo cáo tài chính, phúc lợi nhân viên, cơ cấu tổ chức."
-            )
-
-            if intent == "COMPARISON":
-                sys_prompt = base_policy + (
-                    "\n\nHƯỚNG DẪN RIÊNG (SO SÁNH/ĐỐI CHIẾU):\n"
-                    "- Trình bày có cấu trúc, làm rõ điểm giống/khác; ưu tiên bảng Markdown khi phù hợp.\n"
-                    "- Chỉ dùng thông tin trong tài liệu nội bộ; nếu có mâu thuẫn, nêu rõ và ưu tiên tài liệu mới nhất.\n"
-                )
-            elif intent == "SYNTHESIS":
-                sys_prompt = base_policy + (
-                    "\n\nHƯỚNG DẪN RIÊNG (TỔNG HỢP):\n"
-                    "- Kết nối thông tin từ nhiều tài liệu một cách logic, rõ ràng, mạch lạc.\n"
-                    "- Ưu tiên dữ liệu bảng; nếu có mâu thuẫn, nêu rõ và ưu tiên tài liệu mới nhất.\n"
-                )
-            else:  # Default to SIMPLE_QA
-                sys_prompt = base_policy + (
-                    "\n\nLƯU Ý THỰC THI: Khi người dùng yêu cầu tính toán trên bảng (tổng, trung bình, lớn nhất, nhỏ nhất), hãy tính toán chính xác dựa trên dữ liệu bảng.\n"
-                    "Nếu cần gọi công cụ tính toán bảng, trả về một JSON object duy nhất theo định dạng sau (không trả lời trực tiếp):\n"
-                    '```json\n{"tool_name": "table_calculator", "table": "<toàn bộ bảng dạng Markdown>", "operation": "<SUM|AVG|MAX|MIN>", "column": "<tên cột>"}\n```'
-                )
-
-            # Inject rolling summary if available
-            summary_context = ""
-            if history and len(history) > 2 and session and session.summary:
-                summary_context = f"Tóm tắt cuộc trò chuyện trước:\n{session.summary}\n\n---\n\n"
-
-            user_prompt = f"{summary_context}Thông tin từ tài liệu:\n{context}\n\nCâu hỏi: {message}" if context.strip() else message
-            msgs = [{"role": "system", "content": sys_prompt}]
-            if history: msgs.extend(history[-HISTORY_MAX_HISTORY_MESSAGES:])
-            msgs.append({"role": "user", "content": user_prompt})
-
-            resp = openai_client.chat.completions.create(
-                model=_cfg_chat_model(), messages=msgs, temperature=0.2 if brief else 0.4, max_tokens=_cfg_max_tokens(800))
-            text = (resp.choices[0].message.content or "").strip()
-            usage = getattr(resp, 'usage', None)
-            tokens = usage.total_tokens if usage and hasattr(usage, 'total_tokens') else 0
-
-            tool_call_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
-            if tool_call_match:
-                try:
-                    tool_data = json.loads(tool_call_match.group(1))
-                    if tool_data.get("tool_name") == "table_calculator":
-                        print(f"[Chat] Received tool call: {tool_data}")
-                        calc_result = _execute_table_calculation(
-                            tool_data.get("table", ""), tool_data.get("operation", ""), tool_data.get("column", ""))
-                        print(f"[Chat] Tool execution result: {calc_result}")
-
-                        synthesis_prompt = f"Dựa trên câu hỏi gốc và kết quả tính toán, hãy đưa ra câu trả lời tự nhiên.\nCâu hỏi: '{message}'\nKết quả: '{calc_result}'\nCâu trả lời:"
-
-                        final_resp = openai_client.chat.completions.create(
-                            model=_cfg_chat_model(), messages=[{"role": "user", "content": synthesis_prompt}], temperature=0.1, max_tokens=200)
-                        final_text = (final_resp.choices[0].message.content or "").strip()
-
-                        final_usage = getattr(final_resp, 'usage', None)
-                        final_tokens = final_usage.total_tokens if final_usage and hasattr(final_usage, 'total_tokens') else 0
-                        total_tokens = tokens + final_tokens
-
-                        try:
-                            qa_cache_set(message, context, {"text": final_text, "intent": intent})
-                        except Exception:
-                            pass
-                        return final_text, total_tokens, int((time.time() - start) * 1000)
-                except Exception as e:
-                    print(f"[Chat] Tool call processing failed: {e}")
-                    return f"Lỗi khi xử lý yêu cầu công cụ: {e}", tokens, int((time.time() - start) * 1000)
-
-            try:
-                qa_cache_set(message, context, {"text": text, "intent": intent})
-            except Exception:
-                pass
-            return text, tokens, int((time.time() - start) * 1000)
-
-        # Fallback for other models...
-        if 'llm' in globals() and llm:
-            prompt = f"Context: {context}\n\nQuestion: {message}\n\nAnswer:" if context else f"Question: {message}\n\nAnswer:"
-            text = (llm.invoke(prompt) or "").strip()
-            try:
-                qa_cache_set(message, context, {"text": text, "intent": intent})
-            except Exception:
-                pass
-            return text, 0, int((time.time() - start) * 1000)
-
-        _fallback_text = "Xin lỗi, mình chưa có đủ ngữ cảnh đáng tin cậy để trả lời câu hỏi này."
-        try:
-            qa_cache_set(message, context, {"text": _fallback_text, "intent": intent})
-        except Exception:
-            pass
-        return (_fallback_text, 0, int((time.time() - start) * 1000))
-    except Exception as e:
-        return (f"Error generating response: {str(e)}", 0, int((time.time() - start) * 1000))
-
-# ---- Lightweight structured extractors for admin tables (e.g., phụ cấp) ----
-import re
-
-def _to_int_vn(num_str: str) -> int | None:
-    try:
-        digits = re.sub(r"[^0-9]", "", num_str or "")
-        return int(digits) if digits else None
-    except Exception:
-        return None
 
 
 
-_all_region_keywords = ["hà nội", "hcm", "tp.hcm", "tp hcm", "hồ chí minh", "cần thơ", "đà nẵng", "nha trang", "ban mê thuột", "ban me thuot", "qui nhơn", "qui nhon", "đà lạt", "da lat"]
 
 
-def _format_vnd(n: int | None) -> str:
-    if n is None:
-        return ""
-    s = f"{n:,}".replace(",", ".")
-    return s
-
-
-def parse_allowance_table(text: str) -> dict:
-    """Parse admin notice like Dalat Hasfarm allowance table.
-    Returns {'groups': [{'regions':[...], 'current':int, 'new':int, 'delta':int}], 'effective_date': 'dd/mm/yyyy'} or {}.
-    """
-    if not text:
-        return {}
-    low = text.lower()
-    # Effective date
-    eff = None
-    m = re.search(r"hiệu lực\s*từ\s*ngày\s*(\d{1,2}/\d{1,2}/\d{4})", low)
-    if m:
-        eff = m.group(1)
-    # Find main row: Hà Nội, HCM, Cần Thơ ... numbers
-    groups = []
-    # Capture a line containing 2-3 cities then 3 numbers
-    m1 = re.search(r"(hà nội[^\n]*hcm[^\n]*cần thơ[^\n]*)(\n|\r| )+([0-9\.\s,]+)(\n|\r| )+([0-9\.\s,]+)(\n|\r| )+([0-9\.\s,]+)", low)
-    if m1:
-        cur = _to_int_vn(m1.group(3))
-        new = _to_int_vn(m1.group(5))
-        delta = _to_int_vn(m1.group(7))
-        groups.append({
-            "regions": ["Hà Nội", "HCM", "Cần Thơ"],
-            "current": cur,
-            "new": new,
-            "delta": delta,
-        })
-    # Capture central-highland block numbers
-    m2 = re.search(r"(miền\s*trung[^\n]*cao\s*nguyên[^\n]*)(?:.|\n|\r)+?([0-9\.\s,]+)\s+([0-9\.\s,]+)\s+([0-9\.\s,]+)", low)
-    if m2:
-        cur = _to_int_vn(m2.group(2))
-        new = _to_int_vn(m2.group(3))
-        delta = _to_int_vn(m2.group(4))
-        # Extract bullet list regions in this block
-        regions = []
-        for line in low.splitlines():
-            if "➤" in line or "-" in line:
-                for kw in ["đà nẵng", "nha trang", "ban mê thuột", "ban me thuot", "qui nhơn", "qui nhon", "đà lạt", "da lat"]:
-                    if kw in line and kw.title() not in regions:
-                        regions.append(kw.title())
-        if not regions:
-            regions = ["Đà Nẵng", "Nha Trang", "Ban Mê Thuột", "Qui Nhơn", "Đà Lạt", "…"]
-        groups.append({
-            "regions": regions,
-            "current": cur,
-            "new": new,
-            "delta": delta,
-        })
-    return {"groups": groups, "effective_date": eff} if groups else {}
-
-
-def try_answer_allowance_question(question: str, parsed: dict) -> str | None:
-    q = (question or "").lower()
-    if not parsed or not parsed.get("groups"):
-        return None
-    if "phụ cấp" not in q and "phu cap" not in q:
-        return None
-    eff = parsed.get("effective_date")
-    # Flatten mapping region -> group
-    region_map: dict[str, dict] = {}
-    for g in parsed["groups"]:
-        for r in g.get("regions", []):
-            region_map[(r or "").lower()] = g
-        # explicit aliases: only map if this group represents HCM/Hồ Chí Minh
-        if any(("hcm" in (r or "").lower()) or ("hồ chí minh" in (r or "").lower()) for r in g.get("regions", [])):
-            for k in ["hcm", "tp.hcm", "tp hcm", "hồ chí minh", "ho chi minh"]:
-                region_map[k] = g
-    # Find target region in question
-    target = None
-    for key in region_map.keys():
-        if key and key in q:
-            target = key
-            break
-    if target:
-        g = region_map[target]
-        cur, new, delta = g.get("current"), g.get("new"), g.get("delta")
-        region_name = target.title().replace("Tp.Hcm", "TP.HCM")
-        core = f"{_format_vnd(new)} đồng/tháng (tăng {_format_vnd(delta)} so với {_format_vnd(cur)})."
-        return (f"Mức phụ cấp ăn trưa tại {region_name} sau điều chỉnh là {core}" +
-                (f" Hiệu lực từ {eff}." if eff else ""))
-    # If ask to list or generic
-    if any(k in q for k in ["chi tiết", "kể chi tiết", "các khu vực", "từng khu vực", "bao nhiêu", "mức"]):
-        lines = []
-        for g in parsed["groups"]:
-            area = ", ".join(g.get("regions", [])[:6])
-            lines.append(f"- {area}: {_format_vnd(g.get('current'))} → {_format_vnd(g.get('new'))} (tăng {_format_vnd(g.get('delta'))})")
-        suffix = f"Hiệu lực từ {eff}." if eff else ""
-        return ("Mức phụ cấp ăn trưa được điều chỉnh như sau:\n" + "\n".join(lines) + ("\n" + suffix if suffix else ""))
-    return None
 
 
 def _encode_query(text: str):
@@ -1418,22 +1201,7 @@ def get_relevant_context(message: str, collection) -> str:
         # Trim and optionally rerank + relevance gate
         candidates = candidates[:10]
         best_score = None
-        if candidates and '_ranker' in globals() and _ranker is not None and RerankRequest is not None:
-            try:
-                passages_to_rerank = [{"id": i, "text": c} for i, c in enumerate(candidates)]
-                rerank_request = RerankRequest(query=message, passages=passages_to_rerank)
-                reranked_results = _ranker.rerank(rerank_request)
-
-                scores = [r['score'] for r in reranked_results]
-                best_score = float(max(scores)) if scores else None
-
-                topk = [r['text'] for r in reranked_results[:5]]
-
-            except Exception as e4:
-                print(f"[Chat] Reranker failed: {e4}")
-                topk = candidates[:5]
-        else:
-            topk = candidates[:5]
+        topk = candidates[:5]
 
         # Relevance threshold (env/db overrideable)
         try:
@@ -1694,7 +1462,7 @@ def get_context_with_sources(queries: list[str], collections: list[Any]) -> tupl
                                 res = collection.get(where_document={"$contains": kw}, limit=7)
                                 docs = res.get("documents", []) or []
                                 metas = res.get("metadatas", []) or []
-                                ids = res.get("ids", []) or []
+
                                 print(f"[Chat] Fallback where_document contains '{kw}' -> {len(docs)} hits in {getattr(collection,'name','?')}")
                                 for i in range(min(len(docs), 7)):
                                     doc = docs[i]; meta = metas[i] if i < len(metas) else {}
@@ -1954,15 +1722,7 @@ Respond ONLY with a valid JSON object in the following format. Do not add any ex
 
 # ---------- Intent & Entity Extraction tailored for Excel/CRM ----------
 
-def _map_nlq_to_generation_intent(nlq_intent: str) -> str:
-    """Map Vietnamese NLQ intent to generation prompt variants."""
-    m = (nlq_intent or "").upper()
-    if m == "COMPARISON":
-        return "COMPARISON"
-    if m == "AGGREGATION":
-        return "AGGREGATION"
-    # Lookup / Filter_List / Descriptive -> simple QA style
-    return "SIMPLE_QA"
+
 
 
 def analyze_nlq_intent_and_entities(query: str) -> NLQIntentResult:
@@ -2047,6 +1807,29 @@ async def _extract_text_from_upload_file(file: UploadFile) -> tuple[str, dict]:
     ext = name.split(".")[-1].lower()
     raw = await file.read()
     summary = {"filename": name, "type": ext, "size": len(raw)}
+
+    # Validate size for temporary context upload (stricter limit)
+    max_ctx_bytes = MAX_CONTEXT_FILE_MB * 1024 * 1024
+    if len(raw) > max_ctx_bytes:
+        return "", {**summary, "error": f"File quá lớn (>{MAX_CONTEXT_FILE_MB}MB) cho ngữ cảnh tạm thời"}
+
+    # MIME/extension/size validation and antivirus scan
+    ok, reason = validate_meta(name, getattr(file, "content_type", None), len(raw))
+    if not ok:
+        return "", {**summary, "error": reason}
+    clean, av_note = antivirus_scan_bytes(raw)
+    if not clean:
+        return "", {**summary, "error": f"Antivirus: {av_note}"}
+
+    # Persist original to local storage for later display/download (LOCAL mode)
+    try:
+        public_url, storage_key = save_bytes("context_files", name, raw)
+        summary["file_url"] = public_url
+        summary["storage_key"] = storage_key
+    except Exception:
+        # Non-fatal; continue without file_url
+        summary["file_url"] = None
+
     try:
         if ext == "pdf":
             try:
@@ -2082,7 +1865,7 @@ async def _extract_text_from_upload_file(file: UploadFile) -> tuple[str, dict]:
             lines: list[str] = []
             sheet_cnt = 0
             row_cnt = 0
-            for sh, df in (xls or {}).items():
+            for _, df in (xls or {}).items():
                 sheet_cnt += 1
                 if df is None or df.empty:
                     continue
@@ -2132,7 +1915,7 @@ async def _extract_text_from_upload_file(file: UploadFile) -> tuple[str, dict]:
 def _get_session_temp_context(db: Session, session_id: str, user_id: str) -> str:
     """Fetch valid temporary context for session (and purge expired)."""
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         # Purge global expired to keep table small
         db.query(TemporaryContext).filter(TemporaryContext.expires_at != None, TemporaryContext.expires_at < now).delete()
         db.commit()
@@ -2141,7 +1924,7 @@ def _get_session_temp_context(db: Session, session_id: str, user_id: str) -> str
     row = db.query(TemporaryContext).filter(TemporaryContext.session_id == session_id, TemporaryContext.user_id == user_id).order_by(TemporaryContext.created_at.desc()).first()
     if not row:
         return ""
-    if row.expires_at and row.expires_at < datetime.utcnow():
+    if row.expires_at and row.expires_at < datetime.now(timezone.utc):
         try:
             db.delete(row)
             db.commit()
@@ -2174,11 +1957,22 @@ async def upload_context_file(
     try:
         db.query(TemporaryContext).filter(TemporaryContext.session_id == session_id, TemporaryContext.user_id == user.id).delete()
         from datetime import timedelta as _td
-        expires_at = datetime.utcnow() + _td(minutes=TEMP_CONTEXT_TTL_MINUTES)
-        row = TemporaryContext(session_id=session_id, user_id=user.id, filename=meta.get('filename'), file_type=meta.get('type'), file_size=meta.get('size'), summary=json.dumps({k: v for k, v in meta.items() if k not in {'error'}}, ensure_ascii=False), content=content[:200000], expires_at=expires_at)
+        expires_at = datetime.now(timezone.utc) + _td(minutes=TEMP_CONTEXT_TTL_MINUTES)
+        row = TemporaryContext(
+            session_id=session_id,
+            user_id=user.id,
+            filename=meta.get('filename'),
+            file_type=meta.get('type'),
+            file_size=meta.get('size'),
+            file_url=meta.get('file_url'),
+            summary=json.dumps({k: v for k, v in meta.items() if k not in {'error'}}, ensure_ascii=False),
+            content=content[:200000],
+            created_at=datetime.now(timezone.utc),
+            expires_at=expires_at,
+        )
         db.add(row)
         db.commit(); db.refresh(row)
-    except Exception as e:
+    except Exception:
         db.rollback()
 
     # Optionally index this file into vector DB so it is available to retrieval
@@ -2246,6 +2040,8 @@ async def send_message(
     user: User = Depends(verify_user),
     db: Session = Depends(get_db)
 ):
+    all_sources: List[dict] = []
+    suggestions: List[str] = []
     """Send a message and get AI response (now with basic conversation history)."""
     print(f"[Chat] Received message from user {user.username}: {request.message}")
 
@@ -2259,19 +2055,32 @@ async def send_message(
                 ChatSession.user_id == user.id
             ).first()
             if not session:
-                raise HTTPException(status_code=404, detail="Chat session not found")
+                if _is_ephemeral_history_user(user):
+                    # Allow ephemeral session reuse by ID (not persisted)
+                    session = ChatSession(
+                        id=request.session_id,
+                        user_id=user.id,
+                        title=request.message[:50] + ("..." if len(request.message) > 50 else "")
+                    )
+                else:
+                    raise HTTPException(status_code=404, detail="Chat session not found")
         else:
-            session = ChatSession(
-                id=str(uuid.uuid4()),
-                user_id=user.id,
-
-
-
-                title=request.message[:50] + "..." if len(request.message) > 50 else request.message
-            )
-            db.add(session)
-            db.commit()
-            db.refresh(session)
+            if _is_ephemeral_history_user(user):
+                # Ephemeral session for admin: do not persist to DB
+                session = ChatSession(
+                    id=str(uuid.uuid4()),
+                    user_id=user.id,
+                    title=request.message[:50] + "..." if len(request.message) > 50 else request.message
+                )
+            else:
+                session = ChatSession(
+                    id=str(uuid.uuid4()),
+                    user_id=user.id,
+                    title=request.message[:50] + "..." if len(request.message) > 50 else request.message
+                )
+                db.add(session)
+                db.commit()
+                db.refresh(session)
 
         # Build recent history based on configured HISTORY_TURNS (N pairs => 2N messages)
         recent_msgs = db.query(ChatMessage).filter(ChatMessage.session_id == session.id).order_by(ChatMessage.timestamp.desc()).limit(HISTORY_MAX_HISTORY_MESSAGES).all()
@@ -2287,14 +2096,14 @@ async def send_message(
         if getattr(session, "summary", None):
             history = [{"role": "system", "content": f"Tóm tắt hội thoại trước:\n{session.summary}"}] + history
 
+
+
+
         # Get ChromaDB collections (query across all backends for fresh data)
 
 
         # Load temporary per-session context if user uploaded a file
-        temp_ctx = _get_session_temp_context(db, session.id, user.id)
-
-        # --- Agentic Layer: Decide which tool to use ---
-        context = ""
+        context = _get_session_temp_context(db, session.id, user.id) or ""
 
 
         # (Fallback Agent) If no internal context is found, try a web search as a last resort
@@ -2310,28 +2119,19 @@ async def send_message(
 
 
 
-        sources = []
 
 
 
 
 
 
-        final_context_docs = {}
 
 
 
 
-        # 1. (Tool) Attempt to use Text-to-SQL for structured data queries
-        if _should_try_text_to_sql(request.message):
-            sql_result = run_text_to_sql_agent(request.message, engine)
 
 
 
-            if sql_result:
-                print("[Agent] Text-to-SQL agent succeeded. Using its result as context.")
-                context = sql_result
-                sources.append({"title": "Database Query", "content": sql_result})
 
         # 2. (Tool) If Text-to-SQL is not used or fails, proceed with standard RAG from VectorDB
         if not context:
@@ -2398,8 +2198,7 @@ async def send_message(
                     else:
                         retrieval_queries = [request.message] + query_analysis["sub_questions"]
                         vector_context, vector_sources = get_context_with_sources(retrieval_queries, collections)
-                # Prune vector context for focus
-                vector_context, vector_sources = _prune_context_with_llm(request.message, vector_context, vector_sources)
+
 
             # Combine contexts: structured first, vector as supplemental
             merged_contexts = []
@@ -2435,69 +2234,103 @@ async def send_message(
                 )
                 tokens_used, response_time_ms = 0, 0
             else:
-                ai_text, tokens_used, response_time_ms = get_ai_response(
-                    request.message,
-                    final_context,
-                    history=history,
-                    intent=_map_nlq_to_generation_intent(nlq.get("intent", "DESCRIPTIVE")),
-                    session=session
+                start_time = time.time()
+                ai_text, tokens_used, _ = get_chat_response(
+                    message=request.message,
+                    context=final_context,
+                    history=history
                 )
+                response_time_ms = int((time.time() - start_time) * 1000)
 
             # Build follow-up suggestions (UI can surface these as clickable chips)
             suggestions = _suggest_followups(request.message, ai_text)
 
-        # Save user message
-        user_message = ChatMessage(
-            id=str(uuid.uuid4()),
-            session_id=session.id,
-            message=request.message,
-            response="",  # do not duplicate AI reply on user row
-            is_user=True,
-            timestamp=datetime.now(timezone.utc),
-            tokens_used=tokens_used,
-            response_time=response_time_ms
-        )
-        db.add(user_message)
+        # Save or skip persistence based on user policy
+        if _is_ephemeral_history_user(user):
+            # For ephemeral users, just return the response without saving
+            return ChatMessageResponse(
+                id=str(uuid.uuid4()),
+                message=request.message,
+                response=ai_text,
+                timestamp=datetime.now(timezone.utc),
+                session_id=session.id,
+                sources=all_sources,
+                suggestions=suggestions,
+            )
 
-        # Save AI response
-        ai_message = ChatMessage(
-            id=str(uuid.uuid4()),
-            session_id=session.id,
-            message="",
-            response=ai_text,
-            is_user=False,
-            timestamp=datetime.now(timezone.utc),
-            tokens_used=0,
-            response_time=0,
-            sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None
-        )
-        db.add(ai_message)
+        # Save or skip persistence based on user policy
+        if _is_ephemeral_history_user(user):
+            # Do not persist history for admin testing
+            ai_msg_id = str(uuid.uuid4())
+            return ChatMessageResponse(
+                id=ai_msg_id,
+                message=request.message,
+                response=ai_text,
+                timestamp=datetime.now(timezone.utc),
+                session_id=session.id,
+                sources=all_sources,
+                suggestions=suggestions
+            )
+        else:
+            # Save user message
+            user_message = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session.id,
+                message=request.message,
+                response="",  # do not duplicate AI reply on user row
+                is_user=True,
+                timestamp=datetime.now(timezone.utc),
+                tokens_used=tokens_used,
+                response_time=response_time_ms
+            )
+            db.add(user_message)
 
-        # Update session
-        session.updated_at = datetime.now(timezone.utc)
+            # Save AI response
+            ai_message = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session.id,
+                message="",
+                response=ai_text,
+                is_user=False,
+                timestamp=datetime.now(timezone.utc),
+                tokens_used=tokens_used,
+                response_time=response_time_ms,
+                sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None
+            )
+            db.add(ai_message)
 
-        db.commit()
-        # Auto-title the session (first turn)
-        try:
-            default_title = request.message[:50] + ("..." if len(request.message) > 50 else "")
-            if (not session.title) or session.title in ("Đoạn Chat", default_title) or session.title.startswith((request.message or "")[:20]):
-                new_title = _suggest_chat_title(request.message, ai_text)
-                if new_title and new_title != session.title:
-                    session.title = new_title
-                    session.updated_at = datetime.now(timezone.utc)
-                    db.commit()
-        except Exception as _e:
-            print(f"[Chat] Auto-title failed: {_e}")
+            # Record token usage
+            token_usage_record = TokenUsage(
+                user_id=user.id,
+                tokens_used=tokens_used,
+                timestamp=datetime.now(timezone.utc)
+            )
+            db.add(token_usage_record)
 
+            # Update session
+            session.updated_at = datetime.now(timezone.utc)
 
-        return ChatMessageResponse(
-            id=ai_message.id,
-            message=request.message,
-            response=ai_text,
-            timestamp=ai_message.timestamp,
-            session_id=session.id,
-            sources=all_sources
-        )
+            db.commit()
+            # Auto-title the session (first turn)
+            try:
+                default_title = request.message[:50] + ("..." if len(request.message) > 50 else "")
+                if (not session.title) or session.title in ("Đoạn Chat", default_title) or session.title.startswith((request.message or "")[:20]):
+                    new_title = _suggest_chat_title(request.message, ai_text)
+                    if new_title and new_title != session.title:
+                        session.title = new_title
+                        session.updated_at = datetime.now(timezone.utc)
+                        db.commit()
+            except Exception as _e:
+                print(f"[Chat] Auto-title failed: {_e}")
+
+            return ChatMessageResponse(
+                id=ai_message.id,
+                message=request.message,
+                response=ai_text,
+                timestamp=ai_message.timestamp,
+                session_id=session.id,
+                sources=all_sources
+            )
 
 
 
@@ -2526,16 +2359,32 @@ async def send_message_with_files(
     if session_id:
         session = db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == user.id).first()
         if not session:
-            raise HTTPException(status_code=404, detail="Chat session not found")
+            if _is_ephemeral_history_user(user):
+                # Allow ephemeral reuse by ID without persistence
+                session = ChatSession(
+                    id=session_id,
+                    user_id=user.id,
+                    title=(message or (files[0].filename if files else ""))[:50]
+                )
+            else:
+                raise HTTPException(status_code=404, detail="Chat session not found")
     else:
-        session = ChatSession(
-            id=str(uuid.uuid4()),
-            user_id=user.id,
-            title=(message or (files[0].filename if files else ""))[:50]
-        )
-        db.add(session)
-        db.commit()
-        db.refresh(session)
+        if _is_ephemeral_history_user(user):
+            # Ephemeral session for admin: do not persist to DB
+            session = ChatSession(
+                id=str(uuid.uuid4()),
+                user_id=user.id,
+                title=(message or (files[0].filename if files else ""))[:50]
+            )
+        else:
+            session = ChatSession(
+                id=str(uuid.uuid4()),
+                user_id=user.id,
+                title=(message or (files[0].filename if files else ""))[:50]
+            )
+            db.add(session)
+            db.commit()
+            db.refresh(session)
 
     # Build recent history based on configured HISTORY_TURNS (N pairs => 2N messages)
     recent_msgs = db.query(ChatMessage).filter(ChatMessage.session_id == session.id).order_by(ChatMessage.timestamp.desc()).limit(HISTORY_MAX_HISTORY_MESSAGES).all()
@@ -2550,7 +2399,7 @@ async def send_message_with_files(
 
     # Aggregate context from files
     extracted_texts: list[str] = []
-    saved_image_urls: list[str] = []  # URLs under /static for History rendering
+    saved_file_sources: list[dict] = []  # Store sources for all saved files
     vision_captions: list[str] = []
     vision_tags: list[str] = []
     vision_entities: list[str] = []
@@ -2561,120 +2410,109 @@ async def send_message_with_files(
     import io, zipfile
     for f in files or []:
         name = f.filename or ""
-        ext = name.split(".")[-1].lower()
+        ext = name.split(".")[-1].lower() if "." in name else ""
         try:
             raw = await read_upload(f)
-            # PDF/TXT
+
+            # 1. Security Validation for all files
+            ok, reason = validate_meta(name, getattr(f, "content_type", None), len(raw))
+            if not ok:
+                print(f"[Chat] send-with-files: Rejecting upload: {reason}")
+                continue
+            clean, av_note = antivirus_scan_bytes(raw)
+            if not clean:
+                print(f"[Chat] send-with-files: Antivirus rejected file: {av_note}")
+                continue
+
+            # 2. Save original file to storage (local/S3) and get URL
+            public_url, _ = save_bytes("chat_files", name, raw)
+            file_source = {"title": f"Tệp đính kèm: {name}", "url": public_url, "size_kb": round(len(raw)/1024)}
+            saved_file_sources.append(file_source)
+
+            # 3. Extract text content for context
             if ext == "pdf":
-                # Prefer LangChain PyPDFLoader; fallback to PyPDF2 when unavailable
                 try:
-                    from langchain_community.document_loaders import PyPDFLoader  # type: ignore
-                    tmp = f"/tmp/{uuid.uuid4()}_{name}"
-                    with open(tmp, "wb") as fh:
-                        fh.write(raw)
-                    loader = PyPDFLoader(tmp)
+                    with open(f"/tmp/{uuid.uuid4()}_{name}", "wb") as tmp_f:
+                        tmp_f.write(raw)
+                    loader = PyPDFLoader(tmp_f.name)
                     docs = loader.load()
-                    os.remove(tmp)
+                    os.remove(tmp_f.name)
                     extracted_texts.extend([d.page_content for d in docs])
-                except Exception:
-                    try:
-                        from PyPDF2 import PdfReader  # type: ignore
-                        import io as _io
-                        reader = PdfReader(_io.BytesIO(raw))
-                        pages = [p.extract_text() or "" for p in reader.pages]
-                        extracted_texts.append("\n".join(pages))
-                    except Exception as _pe:
-                        print(f"[Chat] PDF parse fallback failed: {_pe}")
+                except Exception as pdf_e:
+                    print(f"[Chat] PDF parse failed: {pdf_e}")
             elif ext in ("txt",):
                 extracted_texts.append(raw.decode(errors="ignore"))
             elif ext in ("docx",):
-                # Minimal .docx text extraction via zipfile
                 try:
                     with zipfile.ZipFile(io.BytesIO(raw)) as z:
                         xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
-                    # Strip XML tags (naive)
-                    text = xml.replace("<w:p>", "\n").replace("</w:p>", "\n").replace("<w:t>", "").replace("</w:t>", "")
-                    # Remove residual tags
-                    import re as _re
-                    text = _re.sub(r"<[^>]+>", "", text)
+                    text = re.sub('<[^>]+>', '', xml.replace("<w:p>", "\n").replace("</w:p>", "\n"))
                     extracted_texts.append(text)
-                except Exception as e:
-                    print(f"[Chat] DOCX parse error: {e}")
+                except Exception as docx_e:
+                    print(f"[Chat] DOCX parse error: {docx_e}")
             elif ext in ("jpg", "jpeg", "png", "gif", "webp"):
-                # Persist image to static so History can render it
-                try:
-                    os.makedirs(os.path.join("static", "chat_uploads"), exist_ok=True)
-                    safe_name = f"{uuid.uuid4()}_{os.path.basename(name)}"
-                    disk_path = os.path.join("static", "chat_uploads", safe_name)
-                    with open(disk_path, "wb") as imgf:
-                        imgf.write(raw)
-                    public_url = f"/static/chat_uploads/{safe_name}"
-                    saved_image_urls.append(public_url)
-                except Exception as e:
-                    print(f"[Chat] Could not save image for history: {e}")
-                # OCR & caption via OpenAI Vision if enabled
+                # For images, Vision API analysis is the main context source
                 if USE_OPENAI and openai_client:
                     try:
                         b64 = base64.b64encode(raw).decode("utf-8")
-                        img_url = f"data:image/{ext};base64,{b64}"
-                        # 1) OCR-like text extraction
-                        prompt_text = ("Hãy trích xuất mọi chữ/tables chính từ ảnh dưới dạng văn bản tiếng Việt,"
-                                       " không cần mô tả thừa.")
-                        vis_text = openai_client.chat.completions.create(
-                            model=OPENAI_CHAT_MODEL,
-
-
-                            messages=[
-                                {"role": "user", "content": [
-                                    {"type": "text", "text": prompt_text},
-                                    {"type": "image_url", "image_url": {"url": img_url}}
-                                ]}
-                            ],
-                            temperature=0.0,
-
+                        img_url = f"data:image/*;base64,{b64}"
+                        prompt_text = 'Analyze the image and return a JSON object with: 1. "caption": A concise one-sentence description in Vietnamese. 2. "tags": A list of 5-10 relevant Vietnamese keywords. 3. "entities": A list of key entities like names, dates, or numbers found.'
+                        vis = openai_client.chat.completions.create(
+                            model=_cfg_chat_model(default="gpt-4o"),
+                            messages=[{"role": "user", "content": [{"type": "text", "text": prompt_text}, {"type": "image_url", "image_url": {"url": img_url}}]}],
+                            temperature=0.1, max_tokens=200, response_format={"type": "json_object"}
                         )
-                        extracted_texts.append(vis_text.choices[0].message.content or "")
-                        # 2) Caption + tags/entities for recognition
-                        prompt_cap = os.getenv(
-                            "VISION_CAPTION_PROMPT",
-                            "Mô tả ngắn gọn nội dung ảnh bằng tiếng Việt. Sau đó trả về JSON đúng định dạng: {\"caption\": string, \"tags\": string[], \"entities\": string[]}"
-                        )
-                        vis_cap = openai_client.chat.completions.create(
-                            model=OPENAI_CHAT_MODEL,
-                            messages=[
-                                {"role": "user", "content": [
-                                    {"type": "text", "text": prompt_cap},
-                                    {"type": "image_url", "image_url": {"url": img_url}}
-                                ]}
-                            ],
-                            temperature=0.2,
-                        )
-                        cap_raw = (vis_cap.choices[0].message.content or "").strip()
-                        try:
-                            data = json.loads(cap_raw)
-                            cap = str(data.get("caption", "")).strip()
-                            tags = [str(t).strip() for t in (data.get("tags") or [])][:20]
-                            ents = [str(t).strip() for t in (data.get("entities") or [])][:20]
-                        except Exception:
-                            cap = cap_raw
-                            tags, ents = [], []
-                        if cap:
-                            vision_captions.append(cap)
-                        if tags:
-                            vision_tags.extend(tags)
-                        if ents:
-                            vision_entities.extend(ents)
-                    except Exception as e:
-                        print(f"[Chat] Vision analyze failed: {e}")
+                        cap_raw = (vis.choices[0].message.content or "{}").strip()
+                        data = json.loads(cap_raw)
+                        if data.get("caption"): vision_captions.append(str(data["caption"]))
+                        if data.get("tags"): vision_tags.extend([str(t) for t in data["tags"]][:20])
+                        if data.get("entities"): vision_entities.extend([str(e) for e in data["entities"]][:20])
+                    except Exception as vis_e:
+                        print(f"[Chat] Vision analyze failed: {vis_e}")
             else:
                 print(f"[Chat] Unsupported file type for inline context: {ext}")
         except Exception as e:
-            print(f"[Chat] Error reading file {name}: {e}")
+            print(f"[Chat] Error processing file {name}: {e}")
+
+    # Combine with Chroma context + search by image OCR/Vision (augment with last N user turns)
+    collections = get_all_chroma_collections() or []
+    aug_query2 = build_augmented_query(message or "", history, min_user_msgs=HISTORY_USER_TURNS)
+    chroma_ctx, chroma_sources = get_context_with_sources([aug_query2], collections) if aug_query2 else ("", [])
+
+    files_ctx = "\n\n".join(extracted_texts[:10])
+
+    # Vision context from image analysis
+    vision_summary_parts: list[str] = []
+    if vision_captions: vision_summary_parts.append("; ".join(vision_captions))
+    if vision_tags: vision_summary_parts.append("Tags: " + ", ".join(sorted({t for t in vision_tags if t})[:20]))
+    vision_summary = " ".join(vision_summary_parts).strip()
+    vision_ctx, vision_sources = get_context_with_sources([vision_summary], collections) if vision_summary else ("", [])
+
+    # Combine all contexts and sources
+    ctx_parts: list[str] = []
+    all_sources: list[dict] = []
+
+    if chroma_ctx: ctx_parts.append(chroma_ctx); all_sources.extend(chroma_sources)
+    if vision_ctx: ctx_parts.append(vision_ctx); all_sources.extend(vision_sources)
+    if files_ctx: ctx_parts.append(files_ctx)
+
+    # Add saved file URLs to sources *after* other retrieval to avoid duplication if indexed
+    all_sources.extend(saved_file_sources)
+
+    full_ctx = "\n\n".join(ctx_parts).strip()
+
+    # Fallback context if RAG is empty but we have file info
+    if not full_ctx.strip():
+        fallback_desc = "; ".join(vision_captions[:2])
+        tag_line = ", ".join(sorted({t for t in vision_tags})[:10])
+        if fallback_desc or tag_line or files_ctx:
+            full_ctx = f"Mô tả ảnh (Vision): {fallback_desc}\nTags: {tag_line}\nNội dung tệp: {files_ctx[:500]}".strip()
 
     # Build message content including image markdown so History can render
     msg_with_images = message
-    if saved_image_urls:
-        md_imgs = "\n".join([f"![{os.path.basename(u)}]({u})" for u in saved_image_urls])
+    image_urls = [s['url'] for s in saved_file_sources if s.get('url') and any(s['url'].endswith(ext) for ext in ['png','jpg','jpeg','gif','webp'])]
+    if image_urls:
+        md_imgs = "\n".join([f"![{os.path.basename(u)}]({u})" for u in image_urls])
         msg_with_images = (message + "\n\n" + md_imgs) if message else md_imgs
 
     # Combine with Chroma context + search by image OCR/Vision (augment with last N user turns)
@@ -2727,12 +2565,38 @@ async def send_message_with_files(
     elif STRICT_CONTEXT_ONLY and not full_ctx.strip() and _requires_internal_docs(message):
         ai_text, tokens_used, response_time_ms = ("Xin lỗi, mình chưa tìm thấy thông tin...", 0, 0)
     else:
-        ai_text, tokens_used, response_time_ms = get_ai_response(message or "(Người dùng gửi tệp)", full_ctx, history=history, session=session)
+        start_time = time.time()
+        ai_text, tokens_used, _ = get_chat_response(
+            message=message or "(Người dùng gửi tệp)",
+            context=full_ctx,
+            history=history
+        )
+        response_time_ms = int((time.time() - start_time) * 1000)
 
-    user_message = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message=msg_with_images, response="", is_user=True, timestamp=datetime.now(timezone.utc), tokens_used=tokens_used, response_time=response_time_ms)
+    if _is_ephemeral_history_user(user):
+        # Do not persist any history for admin; return response directly
+        return ChatMessageResponse(
+            id=str(uuid.uuid4()),
+            message=msg_with_images,
+            response=ai_text,
+            timestamp=datetime.now(timezone.utc),
+            session_id=session.id,
+            sources=all_sources
+        )
+
+    user_message = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message=msg_with_images, response="", is_user=True, timestamp=datetime.now(timezone.utc), tokens_used=0, response_time=0)
     db.add(user_message)
-    ai_message = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message="", response=ai_text, is_user=False, timestamp=datetime.now(timezone.utc), tokens_used=0, response_time=0, sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None)
+    ai_message = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message="", response=ai_text, is_user=False, timestamp=datetime.now(timezone.utc), tokens_used=tokens_used, response_time=response_time_ms, sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None)
     db.add(ai_message)
+
+    # Record token usage
+    token_usage_record = TokenUsage(
+        user_id=user.id,
+        tokens_used=tokens_used,
+        timestamp=datetime.now(timezone.utc)
+    )
+    db.add(token_usage_record)
+
     session.updated_at = datetime.now(timezone.utc)
 
     try:
@@ -2765,28 +2629,38 @@ async def send_message_with_files(
     return ChatMessageResponse(id=ai_message.id, message=msg_with_images, response=ai_text, timestamp=ai_message.timestamp, session_id=session.id, sources=all_sources)
 
 
-@router.get("/sessions", response_model=List[ChatSessionResponse])
+@router.get("/sessions", response_model=PaginatedSessions)
 async def get_chat_sessions(
+    page: int = 1,
+    limit: int = 15,
     user: User = Depends(verify_user),
     db: Session = Depends(get_db)
 ):
-    """Get all chat sessions for the current user"""
+    """Get paginated chat sessions for the current user"""
+    # Ephemeral user (admin) has no persisted history
+    if _is_ephemeral_history_user(user):
+        return PaginatedSessions(sessions=[], total=0)
 
-    # user provided by verify_user
+    page = max(1, int(page))
+    limit = max(1, min(100, int(limit)))
 
-    sessions = db.query(ChatSession).filter(
-        ChatSession.user_id == user.id
-    ).order_by(ChatSession.updated_at.desc()).all()
+    base_q = db.query(ChatSession).filter(ChatSession.user_id == user.id)
+    total = base_q.count()
+    sessions = base_q.order_by(ChatSession.updated_at.desc()) \
+                    .offset((page - 1) * limit) \
+                    .limit(limit) \
+                    .all()
 
-    return [
+    items = [
         ChatSessionResponse(
-            id=session.id,
-            title=session.title,
-            created_at=session.created_at,
-            updated_at=session.updated_at
+            id=s.id,
+            title=s.title,
+            created_at=s.created_at,
+            updated_at=s.updated_at
         )
-        for session in sessions
+        for s in sessions
     ]
+    return PaginatedSessions(sessions=items, total=total)
 
 @router.patch("/sessions/{session_id}", response_model=ChatSessionResponse)
 async def rename_chat_session(
@@ -2868,26 +2742,40 @@ async def delete_chat_session(
 
 @router.post("/stream")
 async def stream_message(
-    request: ChatMessageRequest,
+    req: ChatMessageRequest,
+    http: Request,
     user: User = Depends(verify_user),
     db: Session = Depends(get_db)
 ):
     """Stream assistant response progressively for better UX (text-only; no files)."""
-    print(f"[Chat] (stream) Received message from user {user.username}: {request.message}")
+    print(f"[Chat] (stream) Received message from user {user.username}: {req.message}")
 
     # Prepare or create session
     session = None
-    if request.session_id:
-        session = db.query(ChatSession).filter(ChatSession.id == request.session_id, ChatSession.user_id == user.id).first()
+    if req.session_id:
+        session = db.query(ChatSession).filter(ChatSession.id == req.session_id, ChatSession.user_id == user.id).first()
+        if not session and _is_ephemeral_history_user(user):
+            session = ChatSession(
+                id=req.session_id,
+                user_id=user.id,
+                title=req.message[:50] + ("..." if len(req.message) > 50 else "")
+            )
     if not session:
-        session = ChatSession(
-            id=str(uuid.uuid4()),
-            user_id=user.id,
-            title=request.message[:50] + "..." if len(request.message) > 50 else request.message
-        )
-        db.add(session)
-        db.commit()
-        db.refresh(session)
+        if _is_ephemeral_history_user(user):
+            session = ChatSession(
+                id=str(uuid.uuid4()),
+                user_id=user.id,
+                title=req.message[:50] + ("..." if len(req.message) > 50 else "")
+            )
+        else:
+            session = ChatSession(
+                id=str(uuid.uuid4()),
+                user_id=user.id,
+                title=req.message[:50] + "..." if len(req.message) > 50 else req.message
+            )
+            db.add(session)
+            db.commit()
+            db.refresh(session)
 
     # Build history
     history: list[dict] = []
@@ -2900,18 +2788,48 @@ async def stream_message(
 
     # Retrieval with augmented query
     collections = get_all_chroma_collections() or []
-    context, sources = get_context_with_sources([request.message], collections)
+    context, sources = get_context_with_sources([req.message], collections)
 
     try:
-        crm_ctx, crm_sources = find_crm_products_context(db, request.message)
+        crm_ctx, crm_sources = find_crm_products_context(db, req.message)
     except Exception:
         crm_ctx, crm_sources = "", []
     try:
-        ocr_ctx, ocr_sources = find_ocr_sql_context(db, request.message)
+        ocr_ctx, ocr_sources = find_ocr_sql_context(db, req.message)
     except Exception:
         ocr_ctx, ocr_sources = "", []
 
     merged_contexts = []
+
+    # Quick path: exact/fuzzy FAQ match (answer without calling LLM)
+    try:
+        faq_ans, faq_source = _best_faq_match(db, req.message)
+    except Exception:
+        faq_ans, faq_source = (None, None)
+
+    if faq_ans:
+        ai_text = faq_ans.strip()
+        now = datetime.now(timezone.utc)
+        sources = [faq_source] if faq_source else []
+
+        async def faq_streamer():
+            yield ai_text.encode("utf-8")
+
+        # Save to DB before returning
+        if not _is_ephemeral_history_user(user):
+            try:
+                user_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message=req.message, response="", is_user=True, timestamp=now)
+                db.add(user_msg)
+                ai_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message="", response=ai_text, is_user=False, timestamp=now, sources=json.dumps(sources, ensure_ascii=False) if sources else None)
+                db.add(ai_msg)
+                session.updated_at = now
+                db.commit()
+            except Exception as e:
+                print(f"[Chat] DB save failed for FAQ response: {e}")
+                db.rollback()
+
+        return StreamingResponse(faq_streamer(), media_type="text/event-stream")
+
     if crm_ctx: merged_contexts.append(crm_ctx)
     if ocr_ctx: merged_contexts.append(ocr_ctx)
     if context: merged_contexts.append(context)
@@ -2926,10 +2844,10 @@ async def stream_message(
             sid_line = f"<<SID:{session.id}>>"
             yield sid_line.encode("utf-8")
 
-            if _is_greeting(request.message):
+            if _is_greeting(req.message):
                 full_text = "Xin chào! Mình là trợ lý AI nội bộ của DalatHasfarm. Mình có thể hỗ trợ bạn tra cứu thông tin hoặc giải đáp công việc gì hôm nay?"
                 yield full_text.encode("utf-8")
-            elif STRICT_CONTEXT_ONLY and not (final_context and final_context.strip()) and _requires_internal_docs(request.message):
+            elif STRICT_CONTEXT_ONLY and not (final_context and final_context.strip()) and _requires_internal_docs(req.message):
                 full_text = "Xin lỗi, mình chưa tìm thấy thông tin liên quan trong tài liệu nội bộ để trả lời câu hỏi này."
                 yield full_text.encode("utf-8")
             else:
@@ -2938,58 +2856,79 @@ async def stream_message(
                     try:
                         summary_context = f"Tóm tắt cuộc trò chuyện trước:\n{session.summary}\n\n---\n\n" if (session and session.summary) else ""
                         user_prompt = (
-                            f"{summary_context}Thông tin từ tài liệu:\n{final_context}\n\nCâu hỏi: {request.message}"
-                            if final_context.strip() else f"{summary_context}{request.message}"
+                            f"{summary_context}Thông tin từ tài liệu:\n{final_context}\n\nCâu hỏi: {req.message}"
+                            if final_context.strip() else f"{summary_context}{req.message}"
                         )
                         messages = [{"role": "system", "content": "Bạn là một trợ lý AI chuyên nghiệp..."}]
                         if history: messages.extend(history[-HISTORY_MAX_HISTORY_MESSAGES:])
                         messages.append({"role": "user", "content": user_prompt})
-                        stream = openai_client.chat.completions.create(model=OPENAI_CHAT_MODEL, messages=messages, stream=True)
-                        for ev in stream:
-                            delta = getattr(getattr(ev.choices[0], 'delta', None), 'content', None)
-                            if delta:
-                                buffer.append(delta)
-                                yield delta.encode("utf-8")
+                        # Retry with exponential backoff and enforce timeout/cancellation
+                        attempt = 0
+                        deadline = time.time() + STREAM_TIMEOUT_SECONDS
+                        while attempt < RETRY_MAX_ATTEMPTS and time.time() < deadline:
+                            try:
+                                stream = openai_client.chat.completions.create(model=OPENAI_CHAT_MODEL, messages=messages, stream=True)
+                                for ev in stream:
+                                    delta = getattr(getattr(ev.choices[0], 'delta', None), 'content', None)
+                                    if delta:
+                                        buffer.append(delta)
+                                        yield delta.encode("utf-8")
+                                    # Client disconnected?
+                                    if await http.is_disconnected():
+                                        print("[Chat] client disconnected during stream; canceling")
+                                        break
+                                    # Timeout?
+                                    if time.time() >= deadline:
+                                        print("[Chat] stream timed out")
+                                        break
+                                if buffer:
+                                    break  # success
+                            except Exception as e:
+                                print(f"[Stream] Attempt {attempt+1} failed: {e}")
+                                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                                await asyncio.sleep(min(delay, 5))
+                                attempt += 1
                         full_text = "".join(buffer).strip()
                         try:
-                            qa_cache_set(request.message, final_context, {"text": full_text, "intent": "SIMPLE_QA"})
+                            qa_cache_set(req.message, final_context, {"text": full_text, "intent": "SIMPLE_QA"})
                         except Exception:
                             pass
                     except Exception as oe:
                         print(f"[Chat] OpenAI stream failed: {oe}")
 
                 if not full_text:
-                    full_text, _, _ = get_ai_response(request.message, final_context, history=history, session=session)
+                    full_text, _, _ = get_chat_response(req.message, final_context, history=history)
                     yield full_text.encode("utf-8")
         finally:
             elapsed = int((time.time() - started) * 1000)
-            user_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message=request.message, response="", is_user=True, timestamp=datetime.now(timezone.utc), response_time=elapsed)
-            db.add(user_msg)
-            ai_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message="", response=full_text, is_user=False, timestamp=datetime.now(timezone.utc), sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None)
-            db.add(ai_msg)
+            if not _is_ephemeral_history_user(user):
+                user_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message=req.message, response="", is_user=True, timestamp=datetime.now(timezone.utc), response_time=elapsed)
+                db.add(user_msg)
+                ai_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message="", response=full_text, is_user=False, timestamp=datetime.now(timezone.utc), sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None)
+                db.add(ai_msg)
 
-            # Update rolling summary for the session
-            try:
-                hist_msgs = db.query(ChatMessage).filter(ChatMessage.session_id == session.id).order_by(ChatMessage.timestamp).all()
-                hist_list = []
-                for hm in hist_msgs[-HISTORY_MAX_HISTORY_MESSAGES:]:
-                    if hm.is_user:
-                        hist_list.append({"role": "user", "content": hm.message or ""})
-                    else:
-                        hist_list.append({"role": "assistant", "content": hm.response or ""})
-                _update_session_summary(db, session, hist_list)
-            except Exception as _se:
-                print(f"[Chat] Update rolling summary failed (stream): {_se}")
+                # Update rolling summary for the session
+                try:
+                    hist_msgs = db.query(ChatMessage).filter(ChatMessage.session_id == session.id).order_by(ChatMessage.timestamp).all()
+                    hist_list = []
+                    for hm in hist_msgs[-HISTORY_MAX_HISTORY_MESSAGES:]:
+                        if hm.is_user:
+                            hist_list.append({"role": "user", "content": hm.message or ""})
+                        else:
+                            hist_list.append({"role": "assistant", "content": hm.response or ""})
+                    _update_session_summary(db, session, hist_list)
+                except Exception as _se:
+                    print(f"[Chat] Update rolling summary failed (stream): {_se}")
 
-            try:
-                if (not session.title) or session.title == "Đoạn Chat" or session.title.startswith(request.message[:20]):
-                    new_title = _suggest_chat_title(request.message, full_text)
-                    if new_title and new_title != session.title:
-                        session.title = new_title
-            except Exception as _e:
-                print(f"[Chat] Auto-title(stream) failed: {_e}")
+                try:
+                    if (not session.title) or session.title == "Đoạn Chat" or session.title.startswith(req.message[:20]):
+                        new_title = _suggest_chat_title(req.message, full_text)
+                        if new_title and new_title != session.title:
+                            session.title = new_title
+                except Exception as _e:
+                    print(f"[Chat] Auto-title(stream) failed: {_e}")
 
-            session.updated_at = datetime.now(timezone.utc)
-            db.commit()
+                session.updated_at = datetime.now(timezone.utc)
+                db.commit()
 
     return StreamingResponse(_gen(), media_type="text/plain; charset=utf-8")

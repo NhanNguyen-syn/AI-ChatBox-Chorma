@@ -63,15 +63,15 @@ const AdminDocuments: React.FC = () => {
     try {
       const [docsRes, excelRes] = await Promise.all([
         api.get(`/files/documents?page=${docPage}&limit=${DOCS_PER_PAGE}`),
-        api.get('/admin/excel-files') // Keep excel loading as is for now
-      ])
-      setDocs(docsRes.data.documents ?? [])
-      setDocTotal(docsRes.data.total ?? 0)
-      setExcel(Array.isArray(excelRes.data) ? excelRes.data : (excelRes.data ?? []))
+        api.get('/admin/excel-files')
+      ]);
+      setDocs(docsRes.data.documents ?? []);
+      setDocTotal(docsRes.data.total ?? 0);
+      setExcel(Array.isArray(excelRes.data) ? excelRes.data : []);
     } catch (e: any) {
-      toast.error(e.response?.data?.detail || 'Không thể tải danh sách dữ liệu')
-      setDocs([])
-      setExcel([])
+      toast.error(e.response?.data?.detail || 'Không thể tải danh sách dữ liệu');
+      setDocs([]);
+      setExcel([]);
     } finally {
       setLoading(false)
     }

@@ -27,13 +27,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setSessionPage: (page: number) => {
     set({ sessionPage: page });
+    get().fetchSessions();
   },
 
   fetchSessions: async () => {
-    const { sessionPage } = get();
     try {
-      const res = await api.get(`/chat/sessions?page=${sessionPage}&limit=${SESSIONS_PER_PAGE}`);
-      set({ sessions: res.data.sessions || [], sessionTotal: res.data.total || 0 });
+      const { sessionPage } = get();
+      const res = await api.get(`/chat/sessions`, {
+        params: { page: sessionPage, limit: SESSIONS_PER_PAGE }
+      });
+      const data = res.data;
+      // Backend may return either an array (legacy) or an object { sessions, total }
+      let sessions: Session[] = [];
+      let total = 0;
+      if (Array.isArray(data)) {
+        sessions = data as Session[];
+        total = sessions.length;
+      } else if (data && Array.isArray(data.sessions)) {
+        sessions = data.sessions as Session[];
+        total = Number(data.total) || sessions.length;
+      }
+      set({ sessions, sessionTotal: total });
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || 'Không thể tải lịch sử chat');
       set({ sessions: [], sessionTotal: 0 });

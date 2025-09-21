@@ -40,4 +40,9 @@ xlrd==2.0.1
 duckduckgo-search==5.3.1b1
 
 # Caching
+
+# Optional S3 storage
+boto3==1.34.106
+
 redis==5.0.4
+rq==1.16.1

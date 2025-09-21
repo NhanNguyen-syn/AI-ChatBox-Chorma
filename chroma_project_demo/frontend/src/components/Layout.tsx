@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useBranding } from '../contexts/BrandingContext'
 import { useChatStore } from '../stores/chatStore'
+import ThemeSwitch from './ThemeSwitch'
 import {
     MessageSquare,
     Users,
@@ -10,8 +11,6 @@ import {
     FileText,
     LogOut,
     User,
-    Sun,
-    Moon,
     MoreVertical,
     Trash2,
     AlertTriangle,
@@ -31,7 +30,14 @@ const ChatSessionsList: React.FC = () => {
 
     useEffect(() => {
         fetchSessions()
-    }, [])
+
+        const handleRefresh = () => fetchSessions()
+        window.addEventListener('chat:sessions:refresh', handleRefresh)
+
+        return () => {
+            window.removeEventListener('chat:sessions:refresh', handleRefresh)
+        }
+    }, [fetchSessions])
 
     const openConfirm = (id: string) => {
         setPendingId(id)
@@ -179,7 +185,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0a]">
             {/* Header */}
-            <header className="bg-white shadow-sm border-b dark:bg-[#0d0d0d] dark:border-gray-800">
+            <header className="sticky top-0 z-50 bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70 shadow-sm border-b dark:bg-[#0d0d0d]/90 dark:supports-[backdrop-filter]:bg-[#0d0d0d]/70 dark:border-gray-800">
                 <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 lg:px-8">
                     <div className="flex justify-between items-center h-16">
                         <div className="flex items-center gap-2">
@@ -208,13 +214,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                         </div>
 
                         <div className="flex items-center space-x-3 sm:space-x-4">
-                            <button
-                                onClick={toggleTheme}
-                                title={theme === 'dark' ? 'Chuyển nền sáng' : 'Chuyển nền tối'}
-                                className="flex items-center justify-center h-9 w-9 rounded-full ring-1 ring-gray-200 bg-white hover:bg-gray-50 text-gray-600 hover:text-gray-900 transition-colors"
-                            >
-                                {theme === 'dark' ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
-                            </button>
+                            <ThemeSwitch theme={theme} onToggle={toggleTheme} sizePx={12} />
                             <span className="hidden sm:inline text-sm text-gray-700 dark:text-gray-200">
                                 Xin chào, {user?.full_name}
                             </span>
@@ -233,6 +233,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                         </div>
                     </div>
                 </div>
+                {/* Accent bar under header */}
+                <div className="brand-accent-bar"></div>
+                <div className="h-px bg-gray-200 dark:bg-gray-800"></div>
             </header>
 
             {/* Mobile Drawer */}
@@ -270,7 +273,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
             <div className="flex">
                 {/* Sidebar (desktop) */}
-                <nav className="hidden md:block fixed top-16 left-0 w-64 bg-white shadow-sm dark:bg-[#0d0d0d] dark:border-r dark:border-gray-800 h-[calc(100vh-4rem)] overflow-y-auto z-40">
+                <nav className="hidden md:block fixed top-[4.6rem] left-0 w-64 bg-white shadow-sm dark:bg-[#0d0d0d] dark:border-r dark:border-gray-800 h-[calc(100vh-4.6rem)] overflow-y-auto z-40">
                     <div className="p-4">
                         <nav className="space-y-2">
                             {navItems.map((item) => {
@@ -299,7 +302,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 </nav>
 
                 {/* Main content */}
-                <main className="flex-1 p-4 sm:p-6 text-gray-900 dark:bg-[#0a0a0a] dark:text-gray-100 min-h-screen md:ml-64">
+                <main className="flex-1 p-4 sm:p-6 text-gray-900 dark:bg-[#0a0a0a] dark:text-gray-100 h-[calc(100vh-4.6rem)] md:ml-64 overflow-y-auto">
                     {children}
                 </main>
             </div>

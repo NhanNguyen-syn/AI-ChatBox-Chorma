@@ -15,6 +15,7 @@ class UserProfile(BaseModel):
     username: str
     email: str
     full_name: Optional[str] = None
+    phone: Optional[str] = None
     is_admin: bool
     created_at: datetime
 

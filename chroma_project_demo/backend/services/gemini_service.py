@@ -8,7 +8,7 @@ import json
 import time
 from typing import List, Dict, Any, Optional, Tuple
 import google.generativeai as genai
-from sentence_transformers import SentenceTransformer
+# Avoid importing sentence_transformers at module import time to prevent HF hub issues
 import numpy as np
 
 class GeminiService:
@@ -21,8 +21,9 @@ class GeminiService:
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel('gemini-pro')
         
-        # Khởi tạo embedding model local (miễn phí)
+        # Khởi tạo embedding model local (miễn phí) - lazy import to avoid HF hub issues
         try:
+            from sentence_transformers import SentenceTransformer  # type: ignore
             self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
             print("[Gemini] Initialized with local embeddings")
         except Exception as e:

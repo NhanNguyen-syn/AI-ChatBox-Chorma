@@ -6,9 +6,10 @@ import toast from 'react-hot-toast'
 
 const Register: React.FC = () => {
     const [formData, setFormData] = useState({
-        username: '',
+        staff_code: '',
         email: '',
         full_name: '',
+        phone: '',
         password: '',
         confirmPassword: ''
     })
@@ -37,7 +38,13 @@ const Register: React.FC = () => {
         setLoading(true)
 
         try {
-            await register(formData.username.trim(), formData.email.trim(), formData.password, formData.full_name.trim())
+            await register(
+                formData.staff_code.trim(),
+                formData.email.trim(),
+                formData.password,
+                formData.full_name.trim(),
+                formData.phone.trim()
+            )
             toast.success('Đăng ký thành công! Vui lòng đăng nhập.')
             navigate('/login')
         } catch (error: any) {
@@ -68,18 +75,20 @@ const Register: React.FC = () => {
                 <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
                     <div className="space-y-4">
                         <div>
-                            <label htmlFor="username" className="block text-sm font-medium text-gray-700">
-                                Tên đăng nhập
+                            <label htmlFor="staff_code" className="block text-sm font-medium text-gray-700">
+                                Mã nhân viên (Staff code)
                             </label>
                             <input
-                                id="username"
-                                name="username"
+                                id="staff_code"
+                                name="staff_code"
                                 type="text"
                                 required
-                                value={formData.username}
+                                value={formData.staff_code}
                                 onChange={handleChange}
                                 className="input-field mt-1"
-                                placeholder="Nhập tên đăng nhập"
+                                placeholder="Nhập mã nhân viên"
+                                onInvalid={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('Vui lòng nhập mã nhân viên')}
+                                onInput={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('')}
                             />
                         </div>
 
@@ -96,6 +105,8 @@ const Register: React.FC = () => {
                                 onChange={handleChange}
                                 className="input-field mt-1"
                                 placeholder="Nhập email"
+                                onInvalid={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('Vui lòng nhập email')}
+                                onInput={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('')}
                             />
                         </div>
 
@@ -107,11 +118,28 @@ const Register: React.FC = () => {
                                 id="full_name"
                                 name="full_name"
                                 type="text"
-
                                 value={formData.full_name}
                                 onChange={handleChange}
                                 className="input-field mt-1"
                                 placeholder="Nhập họ và tên"
+                            />
+                        </div>
+
+                        <div>
+                            <label htmlFor="phone" className="block text-sm font-medium text-gray-700">
+                                Số điện thoại
+                            </label>
+                            <input
+                                id="phone"
+                                name="phone"
+                                type="text"
+                                required
+                                value={formData.phone}
+                                onChange={handleChange}
+                                className="input-field mt-1"
+                                placeholder="Nhập số điện thoại"
+                                onInvalid={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('Vui lòng nhập số điện thoại')}
+                                onInput={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('')}
                             />
                         </div>
 
@@ -129,6 +157,8 @@ const Register: React.FC = () => {
                                     onChange={handleChange}
                                     className="input-field pr-10"
                                     placeholder="Nhập mật khẩu"
+                                    onInvalid={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('Vui lòng nhập mật khẩu')}
+                                    onInput={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('')}
                                 />
                                 <button
                                     type="button"
@@ -158,6 +188,8 @@ const Register: React.FC = () => {
                                     onChange={handleChange}
                                     className="input-field pr-10"
                                     placeholder="Nhập lại mật khẩu"
+                                    onInvalid={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('Vui lòng xác nhận mật khẩu')}
+                                    onInput={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('')}
                                 />
                                 <button
                                     type="button"
@@ -189,4 +221,4 @@ const Register: React.FC = () => {
     )
 }
 
-export default Register 
+export default Register

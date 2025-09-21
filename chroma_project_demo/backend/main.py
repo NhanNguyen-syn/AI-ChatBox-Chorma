@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 import os
 
 from routers import auth, chat, admin, files, users, feedback
+from services.middleware import RateLimitMiddleware, LoggingMiddleware
+
 
 from database import engine, Base
 from auth.jwt_handler import verify_token
@@ -14,6 +16,10 @@ from auth.jwt_handler import verify_token
 load_dotenv()
 
 app = FastAPI(title="Chroma AI Chat System", version="1.0.0")
+
+# Global HTTP logging and rate limiting (10 req/min per user/IP)
+app.add_middleware(LoggingMiddleware)
+app.add_middleware(RateLimitMiddleware, requests=int(os.getenv("RATE_LIMIT_RPM", "120")), window_seconds=60)
 
 # CORS middleware
 app.add_middleware(
@@ -104,6 +110,63 @@ def ensure_migrations():
                 print("[Migration] Ensured FTS5 table ocr_texts_fts (with id) and backfilled")
         except Exception as fe:
             print(f"[Migration] FTS5 not available or init failed: {fe}")
+
+        # Documents/TemporaryContext schema updates
+        try:
+            if inspector.has_table('documents'):
+                cols = [c['name'] for c in inspector.get_columns('documents')]
+                with engine.begin() as conn:
+                    if 'file_url' not in cols:
+                        print("[Migration] Adding file_url to documents...")
+                        conn.execute(text("ALTER TABLE documents ADD COLUMN file_url TEXT"))
+                    if 'status' not in cols:
+                        print("[Migration] Adding status to documents...")
+                        conn.execute(text("ALTER TABLE documents ADD COLUMN status VARCHAR(20) DEFAULT 'pending'"))
+                    # Useful indexes
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_documents_uploaded_at ON documents(uploaded_at)"))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_documents_filename ON documents(filename)"))
+            if inspector.has_table('temporary_contexts'):
+                cols = [c['name'] for c in inspector.get_columns('temporary_contexts')]
+                with engine.begin() as conn:
+                    if 'file_url' not in cols:
+                        print("[Migration] Adding file_url to temporary_contexts...")
+                        conn.execute(text("ALTER TABLE temporary_contexts ADD COLUMN file_url TEXT"))
+                    if 'status' not in cols:
+                        print("[Migration] Adding status to documents...")
+                        conn.execute(text("ALTER TABLE documents ADD COLUMN status VARCHAR(20) DEFAULT 'pending'"))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_temp_ctx_session_created ON temporary_contexts(session_id, created_at)"))
+            # Add token_quota to users table
+            if inspector.has_table('users'):
+                cols = [c['name'] for c in inspector.get_columns('users')]
+                with engine.begin() as conn:
+                    if 'token_quota' not in cols:
+                        print("[Migration] Adding token_quota to users...")
+                        conn.execute(text("ALTER TABLE users ADD COLUMN token_quota INTEGER DEFAULT 100000"))
+                    if 'phone' not in cols:
+                        print("[Migration] Adding phone to users...")
+                        conn.execute(text("ALTER TABLE users ADD COLUMN phone VARCHAR"))
+                    if 'role' not in cols:
+                        print("[Migration] Adding role to users...")
+                        conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR DEFAULT 'user'"))
+                    if 'department' not in cols:
+                        print("[Migration] Adding department to users...")
+                        conn.execute(text("ALTER TABLE users ADD COLUMN department VARCHAR"))
+                    if 'account_status' not in cols:
+                        print("[Migration] Adding account_status to users...")
+                        conn.execute(text("ALTER TABLE users ADD COLUMN account_status VARCHAR DEFAULT 'active'"))
+                    if 'last_login' not in cols:
+                        print("[Migration] Adding last_login to users...")
+                        conn.execute(text("ALTER TABLE users ADD COLUMN last_login DATETIME"))
+                # Ensure index on temporary_contexts.expires_at
+                with engine.begin() as conn:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_temp_ctx_expires ON temporary_contexts(expires_at)"))
+            # Chat message pagination index
+            if inspector.has_table('chat_messages'):
+                with engine.begin() as conn:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_chat_messages_session_ts ON chat_messages(session_id, timestamp)"))
+        except Exception as e:
+            print(f"[Migration] Schema/index patch failed: {e}")
+
         print("[Migration] Migration completed successfully")
         # FTS5 for ExcelRow
         try:
@@ -147,6 +210,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 # Bootstrap admin user if requested
 from auth.jwt_handler import get_password_hash
 from database import SessionLocal, User
+from database import FAQ
 import os
 
 def bootstrap_admin_if_needed():
@@ -189,6 +253,36 @@ def bootstrap_admin_if_needed():
         db.close()
 
 bootstrap_admin_if_needed()
+import uuid
+
+def seed_initial_data():
+    db = SessionLocal()
+    try:
+        faq_question = "Dalat Hasfarm được thành lập khi nào?"
+        existing_faq = db.query(FAQ).filter(FAQ.question.ilike(f'%{faq_question}%')).first()
+
+        if not existing_faq:
+            admin_user = db.query(User).filter(User.is_admin == True).order_by(User.created_at).first()
+            if admin_user:
+                new_faq = FAQ(
+                    id=str(uuid.uuid4()),
+                    question=faq_question,
+                    answer="Dalat Hasfarm được thành lập vào ngày 7 tháng 6 năm 1994.",
+                    category="Thông tin chung",
+                    created_by=admin_user.id,
+                    is_active=True,
+                )
+                db.add(new_faq)
+                db.commit()
+                print(f"[Seeding] Added initial FAQ: '{faq_question}'")
+            else:
+                print("[Seeding] Could not add initial FAQ, no admin user found.")
+    except Exception as e:
+        print(f"[Seeding] Error while seeding data: {e}")
+    finally:
+        db.close()
+
+seed_initial_data()
 
 # Include routers
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
@@ -196,7 +290,6 @@ app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(files.router, prefix="/api/files", tags=["Files"])
 app.include_router(users.router, prefix="/api/users", tags=["Users"])
-app.include_router(feedback.router, prefix="/api/feedback", tags=["Feedback"])
 app.include_router(feedback.router, prefix="/api/feedback", tags=["Feedback"])
 
 # Serve static files

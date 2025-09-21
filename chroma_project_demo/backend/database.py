@@ -22,8 +22,17 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     full_name = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+
+    # Role/Department/Status
+    role = Column(String, default="user")            # 'admin' | 'manager' | 'user' | ...
+    department = Column(String, nullable=True)        # e.g., IT, Sales, Marketing
+    account_status = Column(String, default="active")  # 'active' | 'inactive' | 'suspended'
+    last_login = Column(DateTime, nullable=True)
+
     is_admin = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
+    token_quota = Column(Integer, nullable=True, default=100000)  # Monthly token quota
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -53,7 +62,6 @@ class ChatMessage(Base):
     # Real metrics
     tokens_used = Column(Integer, default=0)
     response_time = Column(Integer, default=0)  # milliseconds
-    sources = Column(Text, nullable=True)
     # For AI messages, this is a JSON string of the sources used.
     sources = Column(Text, nullable=True)
 
@@ -65,6 +73,9 @@ class Document(Base):
     file_path = Column(String)
     file_type = Column(String)
     file_size = Column(Integer)
+    file_url = Column(String, nullable=True)
+    status = Column(String, default="pending")  # pending, completed, failed
+
     uploaded_by = Column(String, ForeignKey("users.id"))
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
@@ -91,6 +102,7 @@ class FAQ(Base):
     question = Column(String)
     answer = Column(Text)
     created_by = Column(String, ForeignKey("users.id"))
+    category = Column(String, nullable=True, default='General')
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     is_active = Column(Boolean, default=True)
@@ -181,9 +193,10 @@ class TemporaryContext(Base):
     filename = Column(String)
     file_type = Column(String)
     file_size = Column(Integer)
+    file_url = Column(String, nullable=True)  # Cloud/local URL for download/display
     summary = Column(String)
     content = Column(Text)  # Extracted text used as temporary context
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     expires_at = Column(DateTime, index=True)
 
 
@@ -195,7 +208,17 @@ class Feedback(Base):
     user_id = Column(String, ForeignKey("users.id"))
     rating = Column(Integer)  # e.g., 1 for like, -1 for dislike
     comment = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+
+class IgnoredQuestion(Base):
+    __tablename__ = 'ignored_questions'
+    id = Column(Integer, primary_key=True, index=True)
+    question = Column(String, unique=True, index=True, nullable=False)
+    ignored_at = Column(DateTime, default=datetime.utcnow)
+    # match User.id which is a String UUID
+    ignored_by_id = Column(String, ForeignKey('users.id'))
+
+    ignored_by = relationship("User")
+
 
 
 class QaFeedback(Base):
@@ -208,6 +231,16 @@ class QaFeedback(Base):
     comment = Column(Text)
     question = Column(Text)
     answer = Column(Text)
+class TokenUsage(Base):
+    __tablename__ = "token_usage"
+
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), index=True, nullable=False)
+    tokens_used = Column(Integer, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+
+    user = relationship("User")
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

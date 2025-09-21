@@ -61,7 +61,7 @@ const Login: React.FC = () => {
                     <form onSubmit={handleSubmit} className="space-y-6">
                         {/* Username Field */}
                         <div>
-                            <label className="block text-sm font-medium text-gray-400 mb-2">Tên đăng nhập</label>
+                            <label className="block text-sm font-medium text-gray-400 mb-2">Mã nhân viên (Staff code)</label>
                             <div className="relative">
                                 <User className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5" />
                                 <input
@@ -69,9 +69,9 @@ const Login: React.FC = () => {
                                     value={username}
                                     onChange={(e) => setUsername(e.target.value)}
                                     className="w-full pl-12 pr-4 py-3 rounded-xl bg-gray-100 border-transparent text-gray-800 placeholder-gray-500 focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200"
-                                    placeholder="Tên đăng nhập"
+                                    placeholder="Mã nhân viên"
                                     autoComplete="off"
-                                    required
+                                    required onInvalid={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('Vui lòng nhập mã nhân viên')} onInput={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('')}
                                 />
                             </div>
                         </div>
@@ -89,6 +89,8 @@ const Login: React.FC = () => {
                                     placeholder="Mật khẩu"
                                     autoComplete="new-password"
                                     required
+                                    onInvalid={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('Vui lòng nhập mật khẩu')}
+                                    onInput={(e) => (e.currentTarget as HTMLInputElement).setCustomValidity('')}
                                 />
                                 <button
                                     type="button"

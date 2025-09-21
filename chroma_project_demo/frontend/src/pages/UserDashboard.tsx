@@ -38,6 +38,7 @@ const UserDashboard: React.FC = () => {
     const dragCounter = useRef(0)
     const [showAssistant, setShowAssistant] = useState(true)
     const [feedbackSent, setFeedbackSent] = useState<{ [messageId: string]: boolean }>({})
+    const streamControllerRef = useRef<AbortController | null>(null)
 
     useEffect(() => {
         // Greet user on initial load
@@ -78,6 +79,9 @@ const UserDashboard: React.FC = () => {
 
     const sendMessage = async () => {
         if ((!inputMessage.trim() && pendingFiles.length === 0) || isLoading) return
+        // Cancel any ongoing stream before starting a new one
+        try { streamControllerRef.current?.abort(); } catch (_) {}
+        streamControllerRef.current = null
 
         const previews: AttachmentPreview[] = pendingFiles.map(f => ({
             name: f.name,
@@ -143,13 +147,16 @@ const UserDashboard: React.FC = () => {
                 setMessages(prev => [...prev, placeholder])
 
                 const token = localStorage.getItem('token')
+                const controller = new AbortController()
+                streamControllerRef.current = controller
                 const res = await fetch('/api/chat/stream', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         ...(token ? { Authorization: `Bearer ${token}` } : {}),
                     },
-                    body: JSON.stringify({ message: inputMessage, session_id: currentSessionId })
+                    body: JSON.stringify({ message: inputMessage, session_id: currentSessionId }),
+                    signal: controller.signal,
                 })
                 if (!res.ok || !res.body) throw new Error('Stream failed')
 
@@ -190,10 +197,15 @@ const UserDashboard: React.FC = () => {
                 return
             }
         } catch (error: any) {
+            if (error?.name === 'AbortError') {
+                // Stream cancelled by user (new message/reset)
+                return
+            }
             avatarBus.set('sad')
             toast.error(error.response?.data?.detail || 'Có lỗi xảy ra khi gửi tin nhắn')
         } finally {
             setIsLoading(false)
+            streamControllerRef.current = null
         }
     }
 
@@ -234,6 +246,8 @@ const UserDashboard: React.FC = () => {
     }, [location.search, currentSessionId])
 
     const resetChat = () => {
+        try { streamControllerRef.current?.abort(); } catch (_) {}
+        streamControllerRef.current = null
         setMessages([])
         setCurrentSessionId(null)
         setFeedbackSent({})
@@ -264,12 +278,16 @@ const UserDashboard: React.FC = () => {
         }
     }
 
+    useEffect(() => {
+        return () => { try { streamControllerRef.current?.abort(); } catch (_) {} }
+    }, [])
+
     return (
-        <div className="min-h-screen flex flex-col">
+        <div className="h-full flex flex-col">
             {/* Header */}
-            <div className="bg-white border-b px-3 sm:px-6 py-3 sm:py-4 dark:bg-[#0d0d0d] dark:border-gray-800">
+            <div className="bg-white border-b px-3 sm:px-4 py-2 dark:bg-[#0d0d0d] dark:border-gray-800">
                 <div className="flex items-center justify-between">
-                    <h1 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-gray-100">Chat AI</h1>
+                    <h1 className="text-lg sm:text-xl font-semibold text-gray-900 dark:text-gray-100">Chat AI</h1>
                     <div className="flex items-center gap-2">
                         <style>{`
                 .no-scrollbar::-webkit-scrollbar { display: none; }
@@ -278,53 +296,53 @@ const UserDashboard: React.FC = () => {
 
                         <button
                             onClick={() => setShowAssistant(v => !v)}
-                            className="btn-secondary hidden lg:inline-flex items-center gap-2"
+                            className="btn-secondary-sm hidden lg:inline-flex items-center gap-1.5"
                             title={showAssistant ? 'Ẩn Trợ lý 3D' : 'Hiện Trợ lý 3D'}
                         >
-                            <span>{showAssistant ? 'Ẩn Trợ lý 3D' : 'Hiện Trợ lý 3D'}</span>
+                            <span className="text-sm">{showAssistant ? 'Ẩn Trợ lý 3D' : 'Hiện Trợ lý 3D'}</span>
                         </button>
 
                         <button
                             onClick={resetChat}
-                            className="btn-secondary flex items-center gap-2"
+                            className="btn-secondary-sm flex items-center gap-1.5"
                             title="Bắt đầu cuộc trò chuyện mới"
                         >
                             <RotateCcw className="h-4 w-4" />
-                            <span>Reset</span>
+                            <span className="text-sm">Reset</span>
                         </button>
                     </div>
                 </div>
             </div>
 
-            <div className="flex-1 flex gap-3 sm:gap-6">
+            <div className="flex-1 min-h-0 flex gap-2 sm:gap-3">
                 {/* Avatar Panel (left) */}
                 {showAssistant && (
-                    <div className="hidden lg:block order-2 w-[300px] xl:w-[360px] border-l bg-white dark:bg-[#0d0d0d] dark:border-gray-800">
+                    <div className="hidden lg:block order-2 w-[280px] xl:w-[340px] border-l bg-white dark:bg-[#0d0d0d] dark:border-gray-800">
                         <div className="sticky top-0 p-3">
                             <div className="px-1 pb-2 text-[11px] font-medium tracking-wide text-gray-500 dark:text-gray-300">Agent</div>
-                            <div className="h-[380px] xl:h-[460px] w-full overflow-hidden rounded-2xl border border-white/60 bg-white/70 backdrop-blur-sm shadow-sm dark:bg-white/[0.04] dark:border-white/[0.08]">
+                            <div className="h-[340px] xl:h-[420px] w-full overflow-hidden rounded-2xl border border-white/60 bg-white/70 backdrop-blur-sm shadow-sm dark:bg-white/[0.04] dark:border-white/[0.08]">
                                 <Avatar3D modelUrl="/models/AnimatedCharacter.glb" />
                             </div>
                         </div>
                     </div>
                 )}
                 {/* Chat Area */}
-                <div className="flex-1 flex flex-col order-1">
+                <div className="flex-1 min-h-0 flex flex-col order-1">
                     {/* Messages */}
-                    <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-4 bg-gradient-to-b from-white to-primary-50 dark:from-[#0a0a0a] dark:to-[#0a0a0a]" style={{ scrollbarGutter: 'stable' }}>
+                    <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar p-3 sm:p-4 space-y-2 bg-gradient-to-b from-white to-primary-50 dark:from-[#0a0a0a] dark:to-[#0a0a0a]" style={{ scrollbarGutter: 'stable' }}>
                         {messages.length === 0 && (
                             <div className="flex items-center justify-center h-full">
                                 <div className="w-full max-w-3xl mx-auto px-4">
-                                    <div className="text-center mb-6 dark:text-gray-200">
-                                        <h2 className="text-3xl font-semibold mb-2">Bạn đang tìm kiếm về cái gì?</h2>
-                                        <p className="text-gray-500 dark:text-gray-400">Hỏi bất cứ điều gì và AI sẽ trả lời dựa trên kiến thức có sẵn</p>
+                                    <div className="text-center mb-3 dark:text-gray-200">
+                                        <h2 className="text-2xl font-semibold mb-1.5">Bạn đang tìm kiếm về cái gì?</h2>
+                                        <p className="text-sm text-gray-500 dark:text-gray-400">Hỏi bất cứ điều gì và AI sẽ trả lời dựa trên kiến thức có sẵn</p>
                                     </div>
 
                                     {/* Attached files preview (centered) */}
                                     {pendingFiles.length > 0 && (
-                                        <div className="mb-4 flex flex-wrap gap-2 justify-center">
+                                        <div className="mb-2 flex flex-wrap gap-1.5 justify-center">
                                             {pendingFiles.map((f, idx) => (
-                                                <span key={idx} className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-full bg-gray-100 dark:bg-zinc-800 ring-1 ring-gray-200 dark:ring-zinc-700">
+                                                <span key={idx} className="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-full bg-gray-100 dark:bg-zinc-800 ring-1 ring-gray-200 dark:ring-zinc-700">
                                                     {f.name}
                                                     <button onClick={() => setPendingFiles(pendingFiles.filter((_, i) => i !== idx))} className="opacity-70 hover:opacity-100">
                                                         <X className="h-3 w-3" />
@@ -343,9 +361,9 @@ const UserDashboard: React.FC = () => {
 
                                     {/* Center input */}
                                     <div className="relative">
-                                        <div className="bg-white dark:bg-[#0f0f0f] rounded-2xl shadow-lg ring-1 ring-gray-200 dark:ring-gray-800 px-4 py-4 pr-2 flex items-center gap-3 focus-within:ring-2 focus-within:ring-[#80DB97] focus-within:shadow-[0_0_0_6px_rgba(128,219,151,0.15)]">
+                                        <div className="bg-white dark:bg-[#0f0f0f] rounded-2xl shadow-lg ring-1 ring-gray-200 dark:ring-gray-800 px-3 py-2 pr-2 flex items-center gap-2 focus-within:ring-2 focus-within:ring-[#80DB97] focus-within:shadow-[0_0_0_6px_rgba(128,219,151,0.15)]">
                                             <button onClick={() => fileInputRef.current?.click()} className="text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-2">
-                                                <Paperclip className="h-5 w-5" />
+                                                <Paperclip className="h-4 w-4" />
                                             </button>
                                             <input ref={fileInputRef} type="file" className="hidden" multiple accept=".pdf,.txt,.doc,.docx,image/*" onChange={(e) => setPendingFiles([...(pendingFiles || []), ...(Array.from(e.target.files || []))])} />
                                             <textarea
@@ -353,16 +371,16 @@ const UserDashboard: React.FC = () => {
                                                 onChange={(e) => setInputMessage(e.target.value)}
                                                 onKeyDown={handleKeyPress}
                                                 placeholder="Nhập tin nhắn của bạn..."
-                                                className="flex-1 bg-transparent outline-none resize-none text-[16px] leading-6 max-h-40 pr-2 dark:text-gray-100 dark:placeholder-gray-400"
+                                                className="flex-1 bg-transparent outline-none resize-none text-[14px] leading-5 max-h-40 pr-2 dark:text-gray-100 dark:placeholder-gray-400"
                                                 rows={1}
                                                 disabled={isLoading}
                                             />
                                             <button
                                                 onClick={sendMessage}
                                                 disabled={(inputMessage.trim().length === 0 && pendingFiles.length === 0) || isLoading}
-                                                className="btn-send btn-send-lg disabled:opacity-50 disabled:cursor-not-allowed shadow-md ml-auto"
+                                                className="btn-send btn-send-sm disabled:opacity-50 disabled:cursor-not-allowed shadow-md ml-auto"
                                             >
-                                                <Send className="h-5 w-5" />
+                                                <Send className="h-4 w-4" />
                                             </button>
                                         </div>
                                     </div>
@@ -376,16 +394,16 @@ const UserDashboard: React.FC = () => {
                                 className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
                             >
                                 <div
-                                    className={`${message.role === 'user' ? 'bubble-user' : 'bubble-ai'} w-fit max-w-[70%]`}
+                                    className={`${message.role === 'user' ? 'bubble-user' : 'bubble-ai'} w-fit max-w-[85%]`}
                                 >
                                     <ReactMarkdown
                                         remarkPlugins={[remarkGfm]}
-                                        className="prose prose-sm max-w-none break-words"
+                                        className="prose prose-sm max-w-none break-words prose-p:my-1 prose-headings:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2"
                                     >
                                         {message.content}
                                     </ReactMarkdown>
                                     {message.attachments && message.attachments.length > 0 && (
-                                        <div className="mt-2 space-y-2">
+                                        <div className="mt-1.5 space-y-1.5">
                                             {message.attachments.map((att, idx) => (
                                                 att.url && att.type?.startsWith('image/') ? (
                                                     <img key={idx} src={att.url} alt={att.name} className="max-w-xs rounded-lg border dark:border-zinc-800" />
@@ -395,11 +413,11 @@ const UserDashboard: React.FC = () => {
                                             ))}
                                         </div>
                                     )}
-                                    <div className={`text-xs mt-1 ${message.role === 'user' ? 'text-primary-100' : 'text-gray-500'}`}>
-                                        {new Date(message.timestamp).toLocaleTimeString('vi-VN')}
+                                    <div className={`text-[11px] mt-0.5 ${message.role === 'user' ? 'text-primary-100' : 'text-gray-500'}`}>
+                                        {new Date(message.timestamp).toLocaleTimeString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}
                                     </div>
                                     {message.role === 'assistant' && (
-                                        <div className="mt-2 pt-2 border-t border-white/10 flex items-center gap-2">
+                                        <div className="mt-1 pt-1 border-t border-white/10 flex items-center gap-1.5">
                                             {feedbackSent[message.id] ? (
                                                 <span className="text-xs text-gray-400">Đã cảm ơn!</span>
                                             ) : (
@@ -419,8 +437,8 @@ const UserDashboard: React.FC = () => {
                         ))}
 
                         {isLoading && (
-                            <div className="flex justify-start">
-                                <div className="bg-gray-100 rounded-lg px-4 py-2 dark:bg-[#111111]">
+                            <div className="flex justify-start text-sm">
+                                <div className="bg-gray-100 rounded-lg px-3 py-1.5 dark:bg-[#111111]">
                                     <div className="flex items-center space-x-2">
                                         <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600"></div>
                                         <span className="text-gray-600 dark:text-gray-300">AI đang suy nghĩ...</span>
@@ -434,7 +452,7 @@ const UserDashboard: React.FC = () => {
 
                     {/* Input Area */}
                     {messages.length > 0 && (
-                        <div className="border-t bg-white p-4 dark:bg-[#0d0d0d] dark:border-gray-800">
+                        <div className="border-t bg-white p-3 dark:bg-[#0d0d0d] dark:border-gray-800">
                             <div className="relative max-w-5xl mx-auto">
                                 {/* Attached files preview */}
                                 {pendingFiles.length > 0 && (
@@ -456,10 +474,10 @@ const UserDashboard: React.FC = () => {
                                     </div>
                                 )}
                                 <div
-                                    className="bg-gray-100/90 rounded-full shadow-sm ring-1 ring-gray-200 px-3 py-3 pr-2 flex items-center gap-2 dark:bg-[#0f0f0f] dark:ring-gray-800 focus-within:ring-2 focus-within:ring-[#80DB97] focus-within:shadow-[0_0_0_6px_rgba(128,219,151,0.15)]"
+                                    className="bg-gray-100/90 rounded-full shadow-sm ring-1 ring-gray-200 px-3 py-2 pr-2 flex items-center gap-2 dark:bg-[#0f0f0f] dark:ring-gray-800 focus-within:ring-2 focus-within:ring-[#80DB97] focus-within:shadow-[0_0_0_6px_rgba(128,219,151,0.15)]"
                                 >
                                     <button onClick={() => fileInputRef.current?.click()} className="text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-2">
-                                        <Paperclip className="h-5 w-5" />
+                                        <Paperclip className="h-4 w-4" />
                                     </button>
                                     <input ref={fileInputRef} type="file" className="hidden" multiple accept=".pdf,.txt,.doc,.docx,image/*" onChange={(e) => setPendingFiles([...(pendingFiles || []), ...(Array.from(e.target.files || []))])} />
                                     <textarea
@@ -467,16 +485,16 @@ const UserDashboard: React.FC = () => {
                                         onChange={(e) => setInputMessage(e.target.value)}
                                         onKeyDown={handleKeyPress}
                                         placeholder="Nhập tin nhắn của bạn..."
-                                        className="flex-1 bg-transparent outline-none resize-none text-[15px] leading-6 max-h-40 pr-2 dark:text-gray-100 dark:placeholder-gray-400"
+                                        className="flex-1 bg-transparent outline-none resize-none text-[14px] leading-5 max-h-40 pr-2 dark:text-gray-100 dark:placeholder-gray-400"
                                         rows={1}
                                         disabled={isLoading}
                                     />
                                     <button
                                         onClick={sendMessage}
                                         disabled={(inputMessage.trim().length === 0 && pendingFiles.length === 0) || isLoading}
-                                        className="btn-send btn-send-lg disabled:opacity-50 disabled:cursor-not-allowed shadow-md ml-auto"
+                                        className="btn-send btn-send-sm disabled:opacity-50 disabled:cursor-not-allowed shadow-md ml-auto"
                                     >
-                                        <Send className="h-5 w-5" />
+                                        <Send className="h-4 w-4" />
                                     </button>
                                 </div>
                             </div>

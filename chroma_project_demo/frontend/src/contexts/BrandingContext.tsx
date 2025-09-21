@@ -22,13 +22,18 @@ export const BrandingProvider: React.FC<{ children: ReactNode }> = ({ children }
 
     const loadBrandingConfig = async () => {
         try {
-            const res = await api.get('/admin/branding');
+            // Use public branding endpoint so login page can load without token
+            const res = await api.get('/admin/branding/public');
             setBrandingConfig(res.data);
 
             // Only apply brand title color; do NOT touch Tailwind primary palette
             if (res.data?.primary_color) {
                 const base = tinycolor(res.data.primary_color);
                 document.documentElement.style.setProperty('--brand-title-color', base.toHexString());
+
+                // Accent stripe colors: fixed green + orange tones per branding preference
+                document.documentElement.style.setProperty('--brand-accent-a', '#308748');
+                document.documentElement.style.setProperty('--brand-accent-b', '#f6a645');
             }
 
             // Update favicon
@@ -39,7 +44,8 @@ export const BrandingProvider: React.FC<{ children: ReactNode }> = ({ children }
                 }
             }
         } catch (e) {
-            console.error("Failed to load branding config", e);
+            // Silently ignore on dev if backend is not running yet
+            console.warn("Branding config not available (backend down or no config yet). Using defaults.");
         }
     };
 

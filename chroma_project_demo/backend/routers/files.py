@@ -3,11 +3,14 @@ import os
 from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document as LCDocument
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from services.security import validate_meta, antivirus_scan_bytes
+from services.storage import save_bytes, S3_ENABLED
+from services.background_jobs import enqueue_file_processing
 # Optional: docx support via docx2txt loader
 try:
     from langchain_community.document_loaders import Docx2txtLoader
@@ -85,10 +88,15 @@ class DocumentResponse(BaseModel):
     uploaded_by: str
     uploaded_at: str
     file_size: int
+    status: str
     # Extra indexing info for observability
     backend: Optional[str] = None
     collection: Optional[str] = None
     chunks_indexed: Optional[int] = None
+
+class DocumentListResponse(BaseModel):
+    documents: List[DocumentResponse]
+    total: int
 
 # Initialize embeddings backend
 try:
@@ -1055,12 +1063,18 @@ async def upload_file(
         pass
     print(f"[Upload] Detected type={file_extension}")
 
+    # Validate metadata early
+    ok, reason = validate_meta(file.filename or "", getattr(file, "content_type", None), 0)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+
     # Create uploads directory if it doesn't exist
     upload_dir = "uploads"
     os.makedirs(upload_dir, exist_ok=True)
 
     # Save file (stream to disk for large files)
     file_path = os.path.join(upload_dir, f"{uuid.uuid4()}_{file.filename}")
+    file_bytes = b""
     try:
         total_written = 0
         CHUNK = 1024 * 1024  # 1MB
@@ -1071,71 +1085,62 @@ async def upload_file(
                     break
                 buffer.write(chunk)
                 total_written += len(chunk)
+                # Keep small files in memory for AV/S3; cap at 30MB to avoid memory blowup
+                if len(file_bytes) < 30 * 1024 * 1024:
+                    file_bytes += chunk
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving file: {str(e)}")
 
-    # NOTE: Excel/CSV files are now handled by the dedicated /admin/upload-excel endpoint
-    # which uses a more robust RAG-based processing pipeline. This endpoint is for
-    # unstructured documents (PDF, DOCX, TXT, images).
-    if file_extension in ("xlsx", "xls", "csv"):
-        raise HTTPException(
-            status_code=400,
-            detail="Please use the 'Upload Excel/CSV' feature in the Admin > Data Management page for structured files."
-        )
+    # Re-validate with actual size and antivirus
+    ok, reason = validate_meta(file.filename or "", getattr(file, "content_type", None), total_written)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+    clean, note = antivirus_scan_bytes(file_bytes if file_bytes else open(file_path, 'rb').read())
+    if not clean:
+        # Delete saved file if unsafe
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=f"Upload rejected by antivirus: {note}")
 
-    # === Unstructured Data Pipeline (PDF, DOCX, TXT, Images) ===
+
+
+    # === Background Data Pipeline ===
     try:
-        base_md = {"filename": file.filename, "uploader": admin_user.username, "uploaded_at": datetime.utcnow().isoformat(), "file_type": file_extension}
-        chunks = process_file_content(db, file_path, file_extension, base_metadata=base_md)
-        if not chunks:
-            raise HTTPException(status_code=400, detail="No content could be extracted from the file.")
-
-        # Embed and add to ChromaDB
-        texts = [getattr(ch, 'page_content', '') for ch in chunks]
-        metadatas = [getattr(ch, 'metadata', {}) for ch in chunks]
-        chunk_embeddings: list[list[float]] = []
-        backend = "openai" if (USE_OPENAI and openai_client) else "ollama"
-        if USE_OPENAI and openai_client:
-            for text in texts:
-                resp = openai_client.embeddings.create(model=OPENAI_EMBED_MODEL, input=text)
-                chunk_embeddings.append(resp.data[0].embedding)
-        else:
-             raise Exception("No primary embeddings backend is available (OpenAI is recommended)")
-
-        emb_dim = len(chunk_embeddings[0]) if chunk_embeddings else None
-        collection = get_chroma_collection_for_backend(backend, emb_dim) or get_chroma_collection()
-        if not collection:
-            raise HTTPException(status_code=500, detail="ChromaDB collection is not available")
-        coll_name = getattr(collection, 'name', 'unknown')
-
-        ids = [str(uuid.uuid4()) for _ in chunks]
-        for md in metadatas:
-            md["backend"] = backend
-            md["collection"] = coll_name
-
-        collection.add(embeddings=chunk_embeddings, documents=texts, metadatas=metadatas, ids=ids)
-        print(f"[Index] Added {len(ids)} chunks to '{coll_name}' successfully")
-
-        # Save document and chunk records to SQL
-        document = Document(id=str(uuid.uuid4()), filename=file.filename, file_path=file_path, file_type=file_extension, uploaded_by=admin_user.id, file_size=os.path.getsize(file_path))
+        # Save document record with pending status
+        document = Document(
+            id=str(uuid.uuid4()),
+            filename=file.filename,
+            file_path=file_path,
+            file_type=file_extension,
+            uploaded_by=admin_user.id,
+            file_size=total_written,
+            status="pending"
+        )
         db.add(document)
-        db.commit(); db.refresh(document)
-
-        for ch in chunks:
-            content = getattr(ch, 'page_content', '')
-            if not content: continue
-            md = getattr(ch, 'metadata', {}) or {}
-            db.add(OcrText(document_id=document.id, source_filename=document.filename, page=md.get('page'), chunk_index=md.get('chunk_index'), section=md.get('section'), block_type=md.get('block_type'), ocr_confidence=md.get('ocr_confidence'), content=content, normalized_content=_normalize_vi(clean_ocr_text(content))))
-
-        for cid in ids:
-            db.add(DocumentChunk(document_id=document.id, chunk_id=cid, collection=coll_name))
         db.commit()
+        db.refresh(document)
 
-        return DocumentResponse(id=document.id, filename=document.filename, file_type=document.file_type, uploaded_by=admin_user.username, uploaded_at=document.uploaded_at.isoformat(), file_size=document.file_size, backend=backend, collection=coll_name, chunks_indexed=len(ids))
+        # Enqueue the processing job
+        enqueue_file_processing(file_path, document.id)
 
+        return DocumentResponse(
+            id=document.id,
+            filename=document.filename,
+            file_type=document.file_type,
+            uploaded_by=admin_user.username,
+            uploaded_at=document.uploaded_at.isoformat(),
+            file_size=document.file_size,
+            status=document.status
+        )
     except Exception as e:
-        os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"Error processing unstructured file: {e}")
+        # Clean up file if DB operation fails
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Error enqueuing file for processing: {e}")
 
 @router.post("/upload-chunk")
 async def upload_chunk(
@@ -1281,13 +1286,24 @@ async def finish_upload(
         raise HTTPException(status_code=500, detail=f"Error adding to vector database: {str(e)}")
 
     # Save document record
+    # Save to storage for serving (S3/local) and get URL
+    try:
+        with open(final_path, 'rb') as fh:
+            data = fh.read()
+        public_url, _ = save_bytes('docs', filename, data)
+        file_url = public_url
+    except Exception as _se:
+        print(f"[UploadChunk] Storage save failed: {_se}")
+        file_url = None
+
     document = Document(
         id=str(uuid.uuid4()),
         filename=filename,
         file_path=final_path,
         file_type=file_extension,
         uploaded_by=admin_user.id,
-        file_size=os.path.getsize(final_path)
+        file_size=os.path.getsize(final_path),
+        file_url=file_url
     )
     db.add(document)
     db.commit()
@@ -1364,31 +1380,100 @@ async def finish_upload(
     )
 
 
-@router.get("/documents", response_model=List[DocumentResponse])
+@router.get("/documents", response_model=DocumentListResponse)
 async def get_documents(
+    page: int = 1,
+    limit: int = 10,
     admin_user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Get all uploaded documents"""
+    """Get paginated uploaded documents"""
+    try:
+        page = max(1, int(page))
+        limit = max(1, min(100, int(limit)))
 
-    documents = db.query(Document).order_by(Document.uploaded_at.desc()).all()
+        base_q = db.query(Document)
+        total = base_q.count()
+        documents = (
+            base_q.options(joinedload(Document.uploader))
+            .order_by(Document.uploaded_at.desc())
+            .offset((page - 1) * limit)
+            .limit(limit)
+            .all()
+        )
 
-    result = []
-    for doc in documents:
-        # Get uploader info safely
-        uploader = db.query(User).filter(User.id == doc.uploaded_by).first()
-        uploader_name = uploader.username if uploader else "Unknown"
+        items: list[DocumentResponse] = []
+        for doc in documents:
+            uploader_name = doc.uploader.username if doc.uploader else "Unknown"
+            items.append(DocumentResponse(
+                id=doc.id,
+                filename=doc.filename or "",
+                file_type=doc.file_type or "",
+                uploaded_by=uploader_name,
+                uploaded_at=(doc.uploaded_at.isoformat() if doc.uploaded_at else datetime.utcnow().isoformat()),
+                file_size=int(doc.file_size or 0),
+                status=(doc.status or "pending")
+            ))
 
-        result.append(DocumentResponse(
-            id=doc.id,
-            filename=doc.filename,
-            file_type=doc.file_type,
-            uploaded_by=uploader_name,
-            uploaded_at=doc.uploaded_at.isoformat(),
-            file_size=doc.file_size
-        ))
+        return DocumentListResponse(documents=items, total=int(total or 0))
+    except Exception as e:
+        import traceback
+        print("[Files] get_documents error:", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
-    return result
+class BatchDeleteRequest(BaseModel):
+    ids: List[str]
+
+@router.post("/documents/batch-delete")
+async def batch_delete_documents(
+    request: BatchDeleteRequest,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Batch delete documents by a list of IDs."""
+    if not request.ids:
+        raise HTTPException(status_code=400, detail="No document IDs provided")
+
+    docs_to_delete = db.query(Document).filter(Document.id.in_(request.ids)).all()
+    if not docs_to_delete:
+        return {"message": "No matching documents found to delete."}
+
+    collection_map = {}
+    paths_to_remove = []
+    doc_ids_to_delete = [doc.id for doc in docs_to_delete]
+
+    for doc in docs_to_delete:
+        if doc.file_path and os.path.exists(doc.file_path):
+            paths_to_remove.append(doc.file_path)
+        chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).all()
+        for chunk in chunks:
+            if chunk.collection_name not in collection_map:
+                collection_map[chunk.collection_name] = []
+            collection_map[chunk.collection_name].append(chunk.id)
+
+    for coll_name, chunk_ids in collection_map.items():
+        try:
+            collection = get_chroma_collection(coll_name)
+            if chunk_ids:
+                collection.delete(ids=chunk_ids)
+                print(f"[Delete] Deleted {len(chunk_ids)} chunks from Chroma collection '{coll_name}'.")
+        except Exception as e:
+            print(f"[Delete] Error deleting from Chroma collection '{coll_name}': {e}")
+
+    db.query(DocumentChunk).filter(DocumentChunk.document_id.in_(doc_ids_to_delete)).delete(synchronize_session=False)
+    db.query(Document).filter(Document.id.in_(doc_ids_to_delete)).delete(synchronize_session=False)
+
+    for path in paths_to_remove:
+        try:
+            os.remove(path)
+            print(f"[Delete] Removed file from disk: {path}")
+        except OSError as e:
+            print(f"[Delete] Error removing file {path}: {e}")
+
+    db.commit()
+    return {"message": f"Successfully deleted {len(doc_ids_to_delete)} documents."}
+
 
 @router.delete("/documents/{document_id}")
 async def delete_document(
@@ -1430,6 +1515,67 @@ async def delete_document(
         print(f"Warning: Could not remove from ChromaDB: {e}")
         db.rollback()
 
+
+
+class DocumentBulkDeleteRequest(BaseModel):
+    ids: List[str]
+
+
+@router.delete("/documents")
+async def bulk_delete_documents(
+    payload: DocumentBulkDeleteRequest,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Bulk delete documents by IDs.
+    This matches the frontend's DELETE /files/documents with a JSON body {"ids": [...]}
+    and avoids Method Not Allowed by explicitly supporting DELETE on /documents.
+    """
+    deleted: list[str] = []
+    failed: dict[str, str] = {}
+
+    for doc_id in (payload.ids or []):
+        try:
+            document = db.query(Document).filter(Document.id == doc_id).first()
+            if not document:
+                failed[doc_id] = "not_found"
+                continue
+            # Remove from ChromaDB
+            try:
+                chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == document.id).all()
+                if chunks:
+                    by_collection: dict[str, list[str]] = {}
+                    for ch in chunks:
+                        by_collection.setdefault(ch.collection or "", []).append(ch.chunk_id)
+                    chroma_client = chromadb.PersistentClient(path="./chroma_db")
+                    for cname, ids_to_delete in by_collection.items():
+                        try:
+                            coll = chroma_client.get_collection(name=cname)
+                            coll.delete(ids=ids_to_delete)
+                        except Exception as ce:
+                            print(f"[Files] Bulk delete: could not delete chunks from '{cname}': {ce}")
+                    # Remove chunk rows
+                    db.query(DocumentChunk).filter(DocumentChunk.document_id == document.id).delete()
+                    db.commit()
+            except Exception as e:
+                print(f"[Files] Bulk delete chroma warning for {doc_id}: {e}")
+                db.rollback()
+            # Delete file on disk
+            try:
+                if document.file_path and os.path.exists(document.file_path):
+                    os.remove(document.file_path)
+            except Exception as e:
+                print(f"[Files] Bulk delete file warning for {doc_id}: {e}")
+            # Delete DB record
+            db.delete(document)
+            db.commit()
+            deleted.append(doc_id)
+        except Exception as e:
+            db.rollback()
+            failed[doc_id] = str(e)
+
+    return {"deleted": deleted, "failed": failed, "total_deleted": len(deleted)}
+
     # Delete file
     try:
         if os.path.exists(document.file_path):
@@ -1437,8 +1583,14 @@ async def delete_document(
     except Exception as e:
         print(f"Warning: Could not delete file: {e}")
 
-    # Delete from database
-    db.delete(document)
-    db.commit()
 
-    return {"message": "Document deleted successfully"}
+# Compatibility endpoint for frontend bulk delete
+@router.post("/documents/delete")
+async def compat_bulk_delete_documents(
+    payload: DocumentBulkDeleteRequest,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Frontend sends POST to /documents/delete for bulk actions. Route to the new DELETE handler."""
+    return await bulk_delete_documents(payload, admin_user, db)
+

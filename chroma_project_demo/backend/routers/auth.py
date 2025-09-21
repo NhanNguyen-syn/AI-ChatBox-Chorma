@@ -11,10 +11,11 @@ from auth.jwt_handler import verify_password, get_password_hash, create_access_t
 router = APIRouter()
 
 class UserCreate(BaseModel):
-    username: str
+    staff_code: str
     email: str
     password: str
     full_name: Optional[str] = None
+    phone: Optional[str] = None
 
 class UserLogin(BaseModel):
     username: str
@@ -33,11 +34,12 @@ class PasswordResetRequest(BaseModel):
 
 @router.post("/register", response_model=Token)
 async def register(user: UserCreate, db: Session = Depends(get_db)):
-    # Check if user already exists
-    db_user = db.query(User).filter(User.username == user.username).first()
+    # Check if staff_code (stored as username) already exists
+    db_user = db.query(User).filter(User.username == user.staff_code).first()
     if db_user:
-        raise HTTPException(status_code=400, detail="Username already registered")
+        raise HTTPException(status_code=400, detail="Staff code already registered")
 
+    # Check email uniqueness
     db_user = db.query(User).filter(User.email == user.email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -45,8 +47,10 @@ async def register(user: UserCreate, db: Session = Depends(get_db)):
     # Create new user
     hashed_password = get_password_hash(user.password)
     db_user = User(
-        username=user.username,
+        username=user.staff_code,  # store staff_code in username field
         email=user.email,
+        full_name=user.full_name,
+        phone=user.phone,
         hashed_password=hashed_password,
         is_admin=False
     )
@@ -57,7 +61,7 @@ async def register(user: UserCreate, db: Session = Depends(get_db)):
     # Create access token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data={"sub": user.staff_code}, expires_delta=access_token_expires
     )
 
     return Token(
@@ -85,6 +89,20 @@ async def login(form_data: UserLogin, db: Session = Depends(get_db)):
             detail="Account is disabled",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Update last_login timestamp
+    try:
+        from datetime import datetime as _dt
+        user.last_login = _dt.utcnow()
+        # Optionally mark account_status active on login
+        try:
+            if hasattr(user, 'account_status'):
+                user.account_status = 'active'
+        except Exception:
+            pass
+        db.commit()
+    except Exception:
+        db.rollback()
 
     # Create access token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)

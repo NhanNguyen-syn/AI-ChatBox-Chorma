@@ -15,6 +15,7 @@ import Upload from './pages/Upload'
 import Profile from './pages/Profile'
 import Layout from './components/Layout'
 import ForgotPassword from './pages/ForgotPassword'
+import AdminUserEdit from './pages/AdminUserEdit'
 
 function App() {
     return (
@@ -95,6 +96,16 @@ function App() {
                             <ProtectedRoute requireAdmin>
                                 <Layout>
                                     <AdminUsers />
+                                </Layout>
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/admin/users/:id/edit"
+                        element={
+                            <ProtectedRoute requireAdmin>
+                                <Layout>
+                                    <AdminUserEdit />
                                 </Layout>
                             </ProtectedRoute>
                         }

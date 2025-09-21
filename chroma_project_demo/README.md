@@ -8,10 +8,10 @@
 
 Trước khi bắt đầu, hãy đảm bảo bạn đã cài đặt các phần mềm sau:
 
-*   **Python 3.10+**
-*   **Node.js 18+** và **npm**
-*   **(Tùy chọn) Ollama:** Nếu bạn muốn chạy các mô hình LLM local.
-*   **(Tùy chọn) Docker:** Để chạy ChromaDB một cách dễ dàng.
+* **Python 3.10+**
+* **Node.js 18+** và **npm**
+* **(Tùy chọn) Ollama:** Nếu bạn muốn chạy các mô hình LLM local.
+* **(Tùy chọn) Docker:** Để chạy ChromaDB một cách dễ dàng.
 
 ## Hướng dẫn cài đặt
 
@@ -26,23 +26,44 @@ pip install -r requirements.txt
 
 ### 2. Cấu hình Backend
 
-Backend sử dụng các biến môi trường để cấu hình. Bạn có thể tạo một file `.env` trong thư mục `backend` hoặc thiết lập chúng trực tiếp trong terminal.
+Backend sử dụng các biến môi trường để cấu hình. Tạo một file tên là `.env` trong thư mục `backend` với nội dung sau:
 
 **File `.env` mẫu:**
+
 ```env
-# Chọn 1 để sử dụng OpenAI, 0 để dùng Ollama/local models
+# --- Cấu hình mô hình AI ---
+# Chọn 1 để sử dụng OpenAI, 0 để dùng các mô hình local (ví dụ: Ollama)
 USE_OPENAI=1
 
 # Nếu USE_OPENAI=1, hãy cung cấp API key của bạn
-OPENAI_API_KEY="sk-...
+OPENAI_API_KEY="sk-YOUR_API_KEY_HERE"
 
-# (Tùy chọn) Tên các mô hình OpenAI
+# Tên các mô hình OpenAI (có thể thay đổi nếu muốn)
 OPENAI_CHAT_MODEL="gpt-4o-mini"
 OPENAI_EMBED_MODEL="text-embedding-3-large"
 
-# (Tùy chọn) Tên các mô hình Ollama nếu không dùng OpenAI
-# OLLAMA_CHAT_MODEL="llama2"
-# OLLAMA_EMBED_MODEL="llama2"
+# --- Cấu hình OCR (để đọc file PDF/ảnh) ---
+# Bật/tắt tính năng OCR (1 là bật, 0 là tắt)
+ENABLE_OCR="1"
+# Ngôn ngữ cho OCR, ví dụ: "vie+eng" cho tiếng Việt và tiếng Anh
+OCR_LANG="vie+eng"
+# Đường dẫn đến file thực thi Tesseract OCR (chỉ cần trên Windows)
+TESSERACT_CMD="C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# --- Cấu hình Chat ---
+# Số lượt chat gần nhất để đưa vào context
+HISTORY_TURNS="5"
+# Bật/tắt tính năng tóm tắt cuộc trò chuyện
+ROLLING_SUMMARY_ENABLED="1"
+ROLLING_SUMMARY_MAX_MESSAGES="30"
+
+# --- Cấu hình tìm kiếm Web ---
+# Bật/tắt tính năng tìm kiếm web (1 là bật, 0 là tắt)
+ALLOW_WEB_SEARCH="1"
+# Chế độ bổ sung thông tin từ web (1 là tự động, 0 là thủ công)
+AUGMENT_MODE="1"
+# Số lượng kết quả tìm kiếm web
+WEB_SEARCH_RESULTS="3"
 ```
 
 ### 3. Khởi tạo cơ sở dữ liệu và Admin
@@ -105,17 +126,24 @@ npm run dev
 
 ## Các tính năng chính
 
-*   **Chatbot AI:** Giao diện chat để tương tác với LLM.
-*   **Admin Dashboard:**
-    *   **Tổng quan:** Xem thống kê hệ thống.
-    *   **Quản lý User:** Kích hoạt/vô hiệu hóa, cấp/hủy quyền admin.
-    *   **Thương hiệu:** Tùy chỉnh logo, tên và màu sắc chủ đạo của ứng dụng.
+* **Chatbot AI:** Giao diện chat để tương tác với LLM.
+* **Admin Dashboard:**
+  * **Tổng quan:** Xem thống kê hệ thống.
+  * **Quản lý User:** Kích hoạt/vô hiệu hóa, cấp/hủy quyền admin.
+  * **Thương hiệu:** Tùy chỉnh logo, tên và màu sắc chủ đạo của ứng dụng.
 
-## Tài khoản admin và user đã tạo để test 
+## Tài khoản admin và user đã tạo để test
+
 ## admin
+
+```
 Tài khoản : admin
 Mật khẩu : admin123
+```
 
 ## user
-Tài khoản : admin123
+
+```
+Tài khoản : DevNhan
 Mật khẩu : admin123
+```

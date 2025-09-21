@@ -52,6 +52,15 @@ const History: React.FC = () => {
     loadSessions()
   }, [sessionPage])
 
+
+  useEffect(() => {
+    const handleRefresh = () => fetchSessions()
+    window.addEventListener('chat:sessions:refresh', handleRefresh)
+    return () => {
+        window.removeEventListener('chat:sessions:refresh', handleRefresh)
+    }
+  }, [fetchSessions])
+
   // Auto-select first session when the list is loaded, or clear view if selected is deleted
   useEffect(() => {
     if (sessions.length > 0 && !sessions.find(s => s.id === selected?.id)) {
@@ -105,7 +114,7 @@ const History: React.FC = () => {
                   <div className="flex items-center gap-3">
                     <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setSelected(s)}>
                       <div className="font-medium text-gray-800 dark:text-gray-100 truncate" title={s.title}>{s.title || 'Phiên chat'}</div>
-                      <div className="text-xs text-gray-500">Cập nhật: {new Date(s.updated_at).toLocaleString()}</div>
+                      <div className="text-xs text-gray-500">Cập nhật: {new Date(s.updated_at).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}</div>
                     </div>
                     <button
                       onClick={() => openConfirm(s.id)}

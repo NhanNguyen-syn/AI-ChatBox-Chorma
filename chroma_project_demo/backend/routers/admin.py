@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 from sqlalchemy import text
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
 from datetime import datetime, timedelta
 import pandas as pd
@@ -11,7 +11,7 @@ import seaborn as sns
 import io
 import base64
 
-from database import get_db, User, ChatSession, ChatMessage, Document, FAQ, SystemConfig, CrmProduct, Feedback
+from database import get_db, User, ChatSession, ChatMessage, Document, FAQ, SystemConfig, CrmProduct, Feedback, IgnoredQuestion
 from auth.jwt_handler import verify_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -238,6 +238,16 @@ def _extract_crm_from_row(row: dict) -> dict:
 router = APIRouter()
 security = HTTPBearer()
 
+
+# Super admin usernames that are immutable and shown with crown in UI
+_SUPER_ADMINS = {"admin", "sg0510"}
+
+def _is_super_admin_username(username: str | None) -> bool:
+    try:
+        return (username or "").strip().lower() in _SUPER_ADMINS
+    except Exception:
+        return False
+
 class UserResponse(BaseModel):
     id: str
     username: str
@@ -245,8 +255,11 @@ class UserResponse(BaseModel):
     full_name: str | None = None
     is_admin: bool
     is_active: bool
+    account_status: Optional[str] = None
+    role: Optional[str] = None
     created_at: datetime
     chat_count: int
+    token_quota: int | None = None
 
 class ChatStatsResponse(BaseModel):
     total_sessions: int
@@ -269,10 +282,39 @@ class FAQResponse(BaseModel):
     is_active: bool
     created_at: datetime
 
+    # Pydantic v2 config: allow parsing from ORM objects
+    model_config = ConfigDict(from_attributes=True)
+
 class SystemConfigUpdate(BaseModel):
     key: str
     value: str
     description: str
+
+class AdminUserDetail(BaseModel):
+    id: str
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    role: Optional[str] = None
+    department: Optional[str] = None
+    account_status: Optional[str] = None
+    is_admin: bool
+    is_active: bool
+    created_at: datetime
+    last_login: Optional[datetime] = None
+    chat_count: int
+
+class AdminUserUpdate(BaseModel):
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    username: Optional[str] = None  # staff code
+    role: Optional[str] = None
+    department: Optional[str] = None
+    account_status: Optional[str] = None  # active | inactive | suspended
+    new_password: Optional[str] = None
+
 
 def verify_admin(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
     payload = verify_token(credentials.credentials)
@@ -303,7 +345,7 @@ async def get_all_users(
     page: int = 1,
     limit: int = 10,
     role: str = 'all',
-    status: str = 'all'
+    status: str = 'all',
 ):
     query = db.query(User)
 
@@ -316,8 +358,16 @@ async def get_all_users(
         query = query.filter(User.is_active == True)
     elif status == 'inactive':
         query = query.filter(User.is_active == False)
+    elif status == 'suspended':
+        try:
+            query = query.filter(User.account_status == 'suspended')
+        except Exception:
+            pass
 
     all_matching_users = query.all()
+
+    # Sort to bring super admins to the top
+    all_matching_users.sort(key=lambda u: not _is_super_admin_username(u.username))
     total = len(all_matching_users)
 
     start = (page - 1) * limit
@@ -334,11 +384,171 @@ async def get_all_users(
             full_name=getattr(user, 'full_name', None),
             is_admin=bool(getattr(user, 'is_admin', False)),
             is_active=bool(getattr(user, 'is_active', True)),
+            account_status=getattr(user, 'account_status', None),
+            role=getattr(user, 'role', None),
             created_at=user.created_at,
-            chat_count=chat_count
+            chat_count=chat_count,
+            token_quota=user.token_quota
         ))
 
     return PaginatedUsersResponse(users=result, total=total)
+
+@router.get("/users/{user_id}", response_model=AdminUserDetail)
+async def get_user_detail(user_id: str, admin: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    chat_count = db.query(ChatSession).filter(ChatSession.user_id == u.id).count()
+    return AdminUserDetail(
+        id=u.id,
+        username=u.username,
+        email=u.email,
+        full_name=getattr(u, 'full_name', None),
+        phone=getattr(u, 'phone', None),
+        role=getattr(u, 'role', None),
+        department=getattr(u, 'department', None),
+        account_status=getattr(u, 'account_status', None),
+        is_admin=bool(getattr(u, 'is_admin', False)),
+        is_active=bool(getattr(u, 'is_active', True)),
+        created_at=u.created_at,
+        last_login=getattr(u, 'last_login', None),
+        chat_count=chat_count,
+    )
+
+@router.put("/users/{user_id}", response_model=AdminUserDetail)
+async def update_user_detail(user_id: str, payload: AdminUserUpdate, admin: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Protect super admins
+    is_super = _is_super_admin_username(u.username)
+
+    # Email uniqueness
+    if payload.email and payload.email != u.email:
+        exists = db.query(User).filter(User.email == payload.email).first()
+        if exists:
+            raise HTTPException(status_code=400, detail="Email already in use")
+        u.email = payload.email
+
+    # Username (staff code)
+    if payload.username and payload.username != u.username:
+        if is_super:
+            raise HTTPException(status_code=403, detail="Không thể đổi staff code của tài khoản admin độc quyền")
+        exists2 = db.query(User).filter(User.username == payload.username).first()
+        if exists2:
+            raise HTTPException(status_code=400, detail="Staff code already in use")
+        u.username = payload.username
+
+    if payload.full_name is not None:
+        u.full_name = payload.full_name
+    if payload.phone is not None:
+        u.phone = payload.phone
+    if payload.department is not None:
+        u.department = payload.department
+    if payload.role is not None:
+        if is_super:
+            pass
+        else:
+            u.role = payload.role
+            u.is_admin = True if (payload.role or '').lower() == 'admin' else u.is_admin
+    if payload.account_status is not None:
+        if is_super:
+            pass
+        else:
+            u.account_status = payload.account_status
+            if payload.account_status.lower() == 'active':
+                u.is_active = True
+            elif payload.account_status.lower() == 'inactive':
+                u.is_active = False
+
+    # Update password if provided
+    if payload.new_password:
+        from auth.jwt_handler import get_password_hash
+        u.hashed_password = get_password_hash(payload.new_password)
+
+    db.commit(); db.refresh(u)
+    chat_count = db.query(ChatSession).filter(ChatSession.user_id == u.id).count()
+    return AdminUserDetail(
+        id=u.id,
+        username=u.username,
+        email=u.email,
+        full_name=getattr(u, 'full_name', None),
+        phone=getattr(u, 'phone', None),
+        role=getattr(u, 'role', None),
+        department=getattr(u, 'department', None),
+        account_status=getattr(u, 'account_status', None),
+        is_admin=bool(getattr(u, 'is_admin', False)),
+        is_active=bool(getattr(u, 'is_active', True)),
+        created_at=u.created_at,
+        last_login=getattr(u, 'last_login', None),
+        chat_count=chat_count,
+    )
+
+@router.put("/users/{user_id}", response_model=AdminUserDetail)
+async def update_user_detail(user_id: str, payload: AdminUserUpdate, admin: User = Depends(verify_admin), db: Session = Depends(get_db)):
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Protect super admins
+    is_super = _is_super_admin_username(u.username)
+
+    # Email uniqueness
+    if payload.email and payload.email != u.email:
+        exists = db.query(User).filter(User.email == payload.email).first()
+        if exists:
+            raise HTTPException(status_code=400, detail="Email already in use")
+        u.email = payload.email
+
+    # Username (staff code)
+    if payload.username and payload.username != u.username:
+        if is_super:
+            raise HTTPException(status_code=403, detail="Không thể đổi staff code của tài khoản admin độc quyền")
+        exists2 = db.query(User).filter(User.username == payload.username).first()
+        if exists2:
+            raise HTTPException(status_code=400, detail="Staff code already in use")
+        u.username = payload.username
+
+    if payload.full_name is not None:
+        u.full_name = payload.full_name
+    if payload.phone is not None:
+        u.phone = payload.phone
+    if payload.department is not None:
+        u.department = payload.department
+    if payload.role is not None:
+        if is_super:
+            pass  # ignore change
+        else:
+            u.role = payload.role
+            u.is_admin = True if (payload.role or '').lower() == 'admin' else u.is_admin
+    if payload.account_status is not None:
+        if is_super:
+            pass  # ignore change
+        else:
+            u.account_status = payload.account_status
+            # Also mirror to is_active for active/inactive
+            if payload.account_status.lower() == 'active':
+                u.is_active = True
+            elif payload.account_status.lower() == 'inactive':
+                u.is_active = False
+
+    db.commit(); db.refresh(u)
+    chat_count = db.query(ChatSession).filter(ChatSession.user_id == u.id).count()
+    return AdminUserDetail(
+        id=u.id,
+        username=u.username,
+        email=u.email,
+        full_name=getattr(u, 'full_name', None),
+        phone=getattr(u, 'phone', None),
+        role=getattr(u, 'role', None),
+        department=getattr(u, 'department', None),
+        account_status=getattr(u, 'account_status', None),
+        is_admin=bool(getattr(u, 'is_admin', False)),
+        is_active=bool(getattr(u, 'is_active', True)),
+        created_at=u.created_at,
+        last_login=getattr(u, 'last_login', None),
+        chat_count=chat_count,
+    )
+
 
 @router.put("/users/{user_id}/toggle")
 async def toggle_user_status(
@@ -349,8 +559,8 @@ async def toggle_user_status(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.username == 'admin':
-        raise HTTPException(status_code=403, detail="Không thể thay đổi trạng thái của tài khoản admin gốc")
+    if _is_super_admin_username(user.username):
+        raise HTTPException(status_code=403, detail="Không thể thay đổi trạng thái của tài khoản admin độc quyền")
 
     user.is_active = not bool(getattr(user, 'is_active', True))
     db.commit()
@@ -366,13 +576,32 @@ async def toggle_admin_status(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.username == 'admin':
-        raise HTTPException(status_code=403, detail="Không thể thay đổi trạng thái của tài khoản admin gốc")
+    if _is_super_admin_username(user.username):
+        raise HTTPException(status_code=403, detail="Không thể thay đổi trạng thái của tài khoản admin độc quyền")
 
     user.is_admin = not bool(getattr(user, 'is_admin', False))
     db.commit()
 
     return {"message": f"User {'promoted to' if user.is_admin else 'removed from'} admin"}
+
+class QuotaUpdateRequest(BaseModel):
+    token_quota: int
+
+@router.put("/users/{user_id}/quota")
+async def update_user_quota(
+    user_id: str,
+    request: QuotaUpdateRequest,
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.token_quota = request.token_quota
+    db.commit()
+
+    return {"message": f"User {user.username}'s token quota updated to {user.token_quota}"}
 
 @router.get("/stats", response_model=ChatStatsResponse)
 async def get_chat_stats(
@@ -439,15 +668,19 @@ async def get_frequent_questions(
 ):
     """
     Identifies and returns the most frequently asked user questions.
-    Filters out simple greetings and very short messages.
+    Filters out simple greetings, very short messages, and ignored questions.
     """
-    # Query to get questions, filter out assistant messages, group by content, count, and order
+    # Subquery to get all ignored questions
+    ignored_questions_subquery = db.query(IgnoredQuestion.question).subquery()
+
+    # Query to get questions, filter out assistant messages, ignored questions, group by content, count, and order
     frequent_questions = db.query(
         ChatMessage.message.label('question'),
         func.count(ChatMessage.message).label('count')
     ).filter(
         ChatMessage.is_user == True,
-        func.length(ChatMessage.message) > 15  # Filter out very short messages/greetings
+        func.length(ChatMessage.message) > 15,  # Filter out very short messages/greetings
+        ChatMessage.message.notin_(ignored_questions_subquery) # Filter out ignored questions
     ).group_by(
         ChatMessage.message
     ).order_by(
@@ -455,6 +688,82 @@ async def get_frequent_questions(
     ).limit(limit).all()
 
     return [{"question": row.question, "count": row.count} for row in frequent_questions]
+
+class IgnoreQuestionRequest(BaseModel):
+    question: str
+
+@router.post("/frequent-questions/ignore")
+async def ignore_frequent_question(
+    request: IgnoreQuestionRequest,
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    # Check if the question is already ignored
+    existing = db.query(IgnoredQuestion).filter(IgnoredQuestion.question == request.question).first()
+    if existing:
+        return {"message": "Question already ignored"}
+
+    # Add the new question to the ignored list
+    ignored_entry = IgnoredQuestion(
+        question=request.question,
+        ignored_by_id=admin.id
+    )
+    db.add(ignored_entry)
+    db.commit()
+
+    return {"message": "Question ignored successfully"}
+
+
+class IgnoredQuestionResponse(BaseModel):
+    id: int
+    question: str
+    ignored_at: datetime
+    ignored_by_username: Optional[str] = None
+
+    # Pydantic v2 config
+    model_config = ConfigDict(from_attributes=True)
+
+@router.get("/ignored-questions", response_model=List[IgnoredQuestionResponse])
+async def get_ignored_questions(
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    rows = (
+        db.query(
+            IgnoredQuestion.id,
+            IgnoredQuestion.question,
+            IgnoredQuestion.ignored_at,
+            User.username.label("ignored_by_username")
+        )
+        .outerjoin(User, IgnoredQuestion.ignored_by_id == User.id)
+        .order_by(IgnoredQuestion.ignored_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "question": r.question,
+            "ignored_at": r.ignored_at,
+            "ignored_by_username": r.ignored_by_username,
+        }
+        for r in rows
+    ]
+
+@router.delete("/ignored-questions/{ignored_id}")
+async def unignore_question(
+    ignored_id: int,
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    ignored_entry = db.query(IgnoredQuestion).filter(IgnoredQuestion.id == ignored_id).first()
+    if not ignored_entry:
+        raise HTTPException(status_code=404, detail="Ignored question entry not found")
+
+    db.delete(ignored_entry)
+    db.commit()
+
+    return {"message": "Question restored successfully"}
+
 
 
 @router.get("/feedback-chats", response_model=List[FeedbackChatResponse])
@@ -475,7 +784,7 @@ async def get_negative_feedback_chats(
         # Find the preceding user message in the same session
         user_message = db.query(ChatMessage).filter(
             ChatMessage.session_id == assistant_message.session_id,
-            ChatMessage.role == 'user',
+            ChatMessage.is_user == True,
             ChatMessage.timestamp < assistant_message.timestamp
         ).order_by(ChatMessage.timestamp.desc()).first()
 
@@ -483,8 +792,8 @@ async def get_negative_feedback_chats(
             feedback_id=feedback.id,
             chat_message_id=assistant_message.id,
             session_id=assistant_message.session_id,
-            user_question=user_message.content if user_message else "[Không tìm thấy câu hỏi]",
-            assistant_response=assistant_message.content,
+            user_question=(user_message.message if user_message else "[Không tìm thấy câu hỏi]"),
+            assistant_response=(assistant_message.response or ""),
             timestamp=feedback.created_at
         ))
 
@@ -497,19 +806,23 @@ async def get_all_chat_history(
     limit: int = 100
 ):
     messages = db.query(ChatMessage, User.username)\
-        .join(User, ChatMessage.user_id == User.id)\
+        .join(ChatSession, ChatMessage.session_id == ChatSession.id)\
+        .join(User, ChatSession.user_id == User.id)\
         .order_by(desc(ChatMessage.timestamp))\
         .limit(limit)\
         .all()
 
     result = []
     for message, username in messages:
+        # Derive role and content from is_user/message/response schema
+        role = "user" if getattr(message, "is_user", False) else "assistant"
+        content = message.message if getattr(message, "is_user", False) else (message.response or "")
         result.append({
             "id": message.id,
             "username": username,
             "session_id": message.session_id,
-            "role": message.role,
-            "content": message.content,
+            "role": role,
+            "content": content,
             "timestamp": message.timestamp,
             "tokens_used": message.tokens_used,
             "response_time": message.response_time
@@ -523,7 +836,7 @@ async def delete_chat_session_admin(
     admin: User = Depends(verify_admin),
     db: Session = Depends(get_db)
 ):
-    session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -541,8 +854,29 @@ async def get_faqs(
     admin: User = Depends(verify_admin),
     db: Session = Depends(get_db)
 ):
-    faqs = db.query(FAQ).order_by(FAQ.created_at.desc()).all()
-    return faqs
+    rows = (
+        db.query(
+            FAQ.id,
+            FAQ.question,
+            FAQ.answer,
+            FAQ.category,
+            FAQ.is_active,
+            FAQ.created_at,
+        )
+        .order_by(FAQ.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "question": r.question,
+            "answer": r.answer,
+            "category": r.category or "General",
+            "is_active": bool(r.is_active),
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
 
 @router.post("/faqs", response_model=FAQResponse)
 async def create_faq(

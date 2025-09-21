@@ -6,6 +6,7 @@ interface User {
     username: string
     email: string
     full_name?: string
+    phone?: string
     is_admin: boolean
 }
 
@@ -13,7 +14,7 @@ interface AuthContextType {
     user: User | null
     token: string | null
     login: (username: string, password: string) => Promise<void>
-    register: (username: string, email: string, password: string, full_name: string) => Promise<void>
+    register: (staff_code: string, email: string, password: string, full_name: string, phone?: string) => Promise<void>
     logout: () => void
     loading: boolean
 }
@@ -78,13 +79,14 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         }
     }
 
-    const register = async (username: string, email: string, password: string, full_name: string) => {
+    const register = async (staff_code: string, email: string, password: string, full_name: string, phone?: string) => {
         try {
             await api.post('/auth/register', {
-                username,
+                staff_code,
                 email,
                 password,
-                full_name
+                full_name,
+                phone
             })
             // Do not auto-login after registration; caller will handle navigation to login page
         } catch (error: any) {
