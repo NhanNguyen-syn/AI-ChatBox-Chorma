@@ -51,7 +51,7 @@ interface IgnoredQuestion {
 }
 
 interface FeedbackChat {
-    feedback_id: number;
+    feedback_id: string;
     chat_message_id: string;
     session_id: string;
     user_question: string;

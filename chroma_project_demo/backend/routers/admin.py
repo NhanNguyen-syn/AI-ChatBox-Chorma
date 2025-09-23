@@ -331,7 +331,7 @@ class PaginatedUsersResponse(BaseModel):
 
 
 class FeedbackChatResponse(BaseModel):
-    feedback_id: int
+    feedback_id: str
     chat_message_id: str
     session_id: str
     user_question: str
@@ -771,33 +771,52 @@ async def get_negative_feedback_chats(
     admin: User = Depends(verify_admin),
     db: Session = Depends(get_db)
 ):
-    # Get all negative feedback records, joining with the message to get the session_id
-    negative_feedbacks = db.query(Feedback).filter(Feedback.rating == -1).order_by(Feedback.created_at.desc()).limit(100).all()
+    from sqlalchemy.orm import aliased
 
-    response_data = []
-    for feedback in negative_feedbacks:
-        # Get the assistant message that received the feedback
-        assistant_message = db.query(ChatMessage).filter(ChatMessage.id == feedback.chat_message_id).first()
-        if not assistant_message:
-            continue
+    AssistantMsg = aliased(ChatMessage)
+    UserMsg = aliased(ChatMessage)
 
-        # Find the preceding user message in the same session
-        user_message = db.query(ChatMessage).filter(
-            ChatMessage.session_id == assistant_message.session_id,
-            ChatMessage.is_user == True,
-            ChatMessage.timestamp < assistant_message.timestamp
-        ).order_by(ChatMessage.timestamp.desc()).first()
+    # Correlated subquery: latest user message before the assistant message in the same session
+    user_message_sq = (
+        db.query(UserMsg.message)
+        .filter(
+            UserMsg.session_id == AssistantMsg.session_id,
+            UserMsg.is_user == True,
+            UserMsg.timestamp < AssistantMsg.timestamp,
+        )
+        .order_by(UserMsg.timestamp.desc())
+        .limit(1)
+        .correlate(AssistantMsg)
+        .scalar_subquery()
+    )
 
-        response_data.append(FeedbackChatResponse(
-            feedback_id=feedback.id,
-            chat_message_id=assistant_message.id,
-            session_id=assistant_message.session_id,
-            user_question=(user_message.message if user_message else "[Không tìm thấy câu hỏi]"),
-            assistant_response=(assistant_message.response or ""),
-            timestamp=feedback.created_at
-        ))
+    results = (
+        db.query(
+            Feedback.id.label("feedback_id"),
+            AssistantMsg.id.label("chat_message_id"),
+            AssistantMsg.session_id.label("session_id"),
+            user_message_sq.label("user_question"),
+            AssistantMsg.response.label("assistant_response"),
+            Feedback.created_at.label("timestamp"),
+        )
+        .join(AssistantMsg, Feedback.chat_message_id == AssistantMsg.id)
+        .filter(Feedback.rating == -1)
+        .order_by(Feedback.created_at.desc())
+        .limit(100)
+        .all()
+    )
 
-    return response_data
+    return [
+        FeedbackChatResponse(
+            feedback_id=r.feedback_id,
+            chat_message_id=r.chat_message_id,
+            session_id=r.session_id,
+            user_question=(r.user_question or "[Không tìm thấy câu hỏi]"),
+            assistant_response=(r.assistant_response or ""),
+            timestamp=r.timestamp,
+        )
+        for r in results
+    ]
 
 @router.get("/chat-history")
 async def get_all_chat_history(

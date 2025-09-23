@@ -164,6 +164,16 @@ def ensure_migrations():
             if inspector.has_table('chat_messages'):
                 with engine.begin() as conn:
                     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_chat_messages_session_ts ON chat_messages(session_id, timestamp)"))
+            # Feedbacks: ensure created_at exists for admin analytics
+            if inspector.has_table('feedbacks'):
+                cols = [c['name'] for c in inspector.get_columns('feedbacks')]
+                if 'created_at' not in cols:
+                    try:
+                        print("[Migration] Adding created_at to feedbacks...")
+                        with engine.begin() as conn:
+                            conn.execute(text("ALTER TABLE feedbacks ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP"))
+                    except Exception as fe:
+                        print(f"[Migration] Could not add created_at to feedbacks: {fe}")
         except Exception as e:
             print(f"[Migration] Schema/index patch failed: {e}")
 

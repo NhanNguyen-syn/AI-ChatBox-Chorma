@@ -4,7 +4,6 @@ from sqlalchemy.orm import Session
 from database import Document, DocumentChunk, OcrText, get_db
 from routers.files import process_file_content, _normalize_vi, clean_ocr_text
 from langchain_community.embeddings import OllamaEmbeddings
-from sentence_transformers import SentenceTransformer
 import chromadb
 
 # This function will be executed by the RQ worker.

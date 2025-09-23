@@ -42,9 +42,18 @@ const UserDashboard: React.FC = () => {
 
     useEffect(() => {
         // Greet user on initial load
-        avatarBus.set('happy')
-        setTimeout(() => avatarBus.set('idle'), 2500) // Return to idle after wave
-    }, [])
+        if (messages.length === 0 && !location.search.includes('sid=')) {
+            const greetingMessage: Message = {
+                id: 'initial-greeting',
+                role: 'assistant',
+                content: 'Xin chào! Mình là trợ lý AI nội bộ của DalatHasfarm. Mình có thể hỗ trợ bạn tra cứu thông tin hoặc giải đáp công việc gì hôm nay?',
+                timestamp: new Date().toISOString(),
+            };
+            setMessages([greetingMessage]);
+            avatarBus.set('happy');
+            setTimeout(() => avatarBus.set('idle'), 2500); // Return to idle after wave
+        }
+    }, [location.search]);
 
     useEffect(() => {
         const prevent = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); }
@@ -117,7 +126,7 @@ const UserDashboard: React.FC = () => {
                 const response = await api.post('/chat/send-with-files', form, { headers: { 'Content-Type': 'multipart/form-data' } })
 
                 const aiMessage: Message = {
-                    id: `${Date.now() + 1}`,
+                    id: `${response.data.id}-a`,
                     role: 'assistant',
                     content: response.data.response,
                     timestamp: new Date().toISOString()
@@ -164,6 +173,7 @@ const UserDashboard: React.FC = () => {
                 const decoder = new TextDecoder()
                 let acc = ''
                 let gotSid = false
+                let streamSid: string | null = null
 
                 while (true) {
                     const { value, done } = await reader.read()
@@ -177,6 +187,7 @@ const UserDashboard: React.FC = () => {
                             const sid = m[1]
                             acc = acc.replace(m[0], '')
                             gotSid = true
+                            streamSid = sid
                             if (sid && sid !== currentSessionId) {
                                 const params = new URLSearchParams(location.search)
                                 params.set('sid', sid)
@@ -193,6 +204,31 @@ const UserDashboard: React.FC = () => {
 
                 avatarBus.set('talk')
                 setTimeout(() => avatarBus.set('idle'), 1200)
+
+                // Refresh messages to get real IDs from server for feedback
+                try {
+                    const sidToLoad = streamSid || currentSessionId
+                    if (sidToLoad) {
+                        const response = await api.get(`/chat/sessions/${sidToLoad}/messages`)
+                        const serverMessages: Message[] = []
+                        const initialFeedback: { [messageId: string]: boolean } = {}
+                        ;(response.data || []).forEach((m: any) => {
+                            if (m.message) {
+                                serverMessages.push({ id: `${m.id}-u`, role: 'user', content: m.message, timestamp: m.timestamp })
+                            }
+                            if (m.response) {
+                                const assistantMessageId = `${m.id}-a`
+                                serverMessages.push({ id: assistantMessageId, role: 'assistant', content: m.response, timestamp: m.timestamp })
+                                if (m.feedback_rating === 1 || m.feedback_rating === -1) {
+                                    initialFeedback[assistantMessageId] = true
+                                }
+                            }
+                        })
+                        setMessages(serverMessages)
+                        setFeedbackSent(prev => ({ ...prev, ...initialFeedback }))
+                    }
+                } catch (_) {}
+
                 setPendingFiles([])
                 return
             }
@@ -264,7 +300,7 @@ const UserDashboard: React.FC = () => {
     const handleFeedback = async (messageId: string, rating: 1 | -1) => {
         const originalId = messageId.replace(/-a$/, '') // Strip suffix for API
         try {
-            await api.post('/feedback/', { chat_message_id: originalId, rating })
+            await api.post('/feedback', { chat_message_id: originalId, rating })
             setFeedbackSent(prev => ({ ...prev, [messageId]: true }))
             toast.success('Cảm ơn bạn đã đánh giá!')
             if (rating === 1) {

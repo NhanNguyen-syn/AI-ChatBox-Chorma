@@ -208,6 +208,7 @@ class Feedback(Base):
     user_id = Column(String, ForeignKey("users.id"))
     rating = Column(Integer)  # e.g., 1 for like, -1 for dislike
     comment = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class IgnoredQuestion(Base):
     __tablename__ = 'ignored_questions'
