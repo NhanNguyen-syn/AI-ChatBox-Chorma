@@ -1,0 +1,23 @@
+[
+  {
+    "question": "Ví dụ: Mức phụ cấp ăn trưa mới cho khu vực A là bao nhiêu?",
+    "golden_answer": "Ví dụ: Mức phụ cấp ăn trưa mới cho khu vực A là 700.000đ.",
+    "golden_sources": [
+      {
+        "source": "2025 - Meal Allowance.pdf",
+        "page": 1
+      }
+    ]
+  },
+  {
+    "question": "Ví dụ: Chính sách hỗ trợ thuê nhà cho nhân viên mới là gì?",
+    "golden_answer": "Ví dụ: Nhân viên mới từ khu vực xa sẽ được hỗ trợ 500.000đ/tháng trong 3 tháng đầu.",
+    "golden_sources": [
+      {
+        "source": "5. Hỗ trợ tiền thuê nhà cho CN mới từ kv xa đến làm việc tại DQ.pdf",
+        "page": 1
+      }
+    ]
+  }
+]
+

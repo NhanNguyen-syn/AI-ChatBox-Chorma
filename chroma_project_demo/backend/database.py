@@ -310,9 +310,13 @@ def get_chroma_client():
     if _chroma_client is None:
         try:
             import chromadb
-            print("[Database] Initializing ChromaDB Persistent Client...")
-            # Store data on disk
-            _chroma_client = chromadb.PersistentClient(path="./chroma_db")
+            from chromadb.config import Settings
+            print("[Database] Initializing ChromaDB Persistent Client with Telemetry OFF...")
+            # Store data on disk and disable telemetry
+            _chroma_client = chromadb.PersistentClient(
+                path="./chroma_db",
+                settings=Settings(anonymized_telemetry=False)
+            )
         except Exception as e:
             print(f"CRITICAL: Could not connect to ChromaDB: {e}")
             return None

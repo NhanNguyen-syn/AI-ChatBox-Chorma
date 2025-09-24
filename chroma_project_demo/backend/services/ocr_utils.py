@@ -36,13 +36,37 @@ def normalize_vi(s: str) -> str:
         return (s or '').lower().strip()
 
 
+# Dictionary of common Vietnamese OCR errors and their corrections
+VI_CORRECTIONS = {
+    # Common errors with diacritics (decomposed form -> composed form)
+    "òa": "oà", "óa": "oá", "ỏa": "oả", "õa": "oã", "ọa": "oạ",
+    "òe": "oè", "óe": "oé", "ỏe": "oẻ", "õe": "oẽ", "ọe": "oẹ",
+    "ùy": "uỳ", "úy": "uý", "ủy": "uỷ", "ũy": "uỹ", "ụy": "uỵ",
+    # Common word misspellings
+    "chưong": "chương",
+    "giao duc": "giáo dục",
+    "qui định": "quy định",
+    "qui chế": "quy chế",
+    "kí": "ký",
+}
+# Create a regex pattern for efficient replacement
+_vi_correction_re = re.compile(r'\b(' + '|'.join(re.escape(key) for key in VI_CORRECTIONS.keys()) + r')\b', re.IGNORECASE)
+
 def clean_ocr_text(text: str) -> str:
     t = (text or "")
     if not t:
         return t
+
+    # 1. Unicode Normalization to NFC for consistent representation
+    t = unicodedata.normalize('NFC', t)
+
+    # 2. Apply Vietnamese-specific corrections
+    t = _vi_correction_re.sub(lambda m: VI_CORRECTIONS[m.group(1).lower()], t)
+
+    # 3. Basic whitespace and line break cleaning
     t = t.replace("\r\n", "\n").replace("\r", "\n")
-    # Join hyphenated line breaks: "pho-\n bien" -> "pho bien"
-    t = re.sub(r"(\w)-\n(\w)", r"\1\2", t)
+    # Join hyphenated line breaks: "pho-\n bien" -> "phobien" (handle with care)
+    t = re.sub(r"(\w)-[\n\s]+(\w)", r"\1\2", t)
     # Merge line breaks splitting words/sentences
     t = re.sub(r"([0-9A-Za-zÀ-ỹ,])\n([0-9a-zà-ỹ])", r"\1 \2", t)
     # Normalize bullets

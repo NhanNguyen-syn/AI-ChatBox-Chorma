@@ -373,7 +373,7 @@ def _layout_aware_chunk_blocks(blocks: list[LCDocument]) -> list[LCDocument]:
     return chunks
 
 
-def extract_pdf_blocks_with_tables(file_path: str, base_metadata: Optional[dict] = None) -> list[LCDocument]:
+def extract_pdf_blocks_with_tables(file_path: str, original_filename: str, base_metadata: Optional[dict] = None) -> list[LCDocument]:
     """Extract PDF into blocks preserving tables when possible using pdfplumber.
     Returns a list of LangChain Documents with metadata including page, block_index, block_type.
     """
@@ -382,7 +382,7 @@ def extract_pdf_blocks_with_tables(file_path: str, base_metadata: Optional[dict]
         import pdfplumber  # type: ignore
         with pdfplumber.open(file_path) as pdf:
             for pidx, page in enumerate(pdf.pages):
-                md_base = {"source": os.path.basename(file_path), "type": "pdf", "page": pidx + 1}
+                md_base = {"source": original_filename, "type": "pdf", "page": pidx + 1}
                 if base_metadata:
                     md_base.update(base_metadata)
                 # 1) tables first (so we can remove them from text if needed)
@@ -448,8 +448,9 @@ def is_scanned_pdf(file_path: str) -> bool:
             first_page = pdf.pages[0]
             text = first_page.extract_text() or ""
             # Heuristic: if very few characters are found, it's probably an image/scan.
-            if len(text.strip()) < 50:
-                print(f"[PDF Classify] PDF '{os.path.basename(file_path)}' is likely SCANNED.")
+            scan_threshold = int(os.getenv("PDF_SCAN_CHAR_THRESHOLD", "50"))
+            if len(text.strip()) < scan_threshold:
+                print(f"[PDF Classify] PDF '{os.path.basename(file_path)}' is likely SCANNED (text length < {scan_threshold}).")
                 return True
             print(f"[PDF Classify] PDF '{os.path.basename(file_path)}' is TEXT-BASED.")
             return False
@@ -457,7 +458,7 @@ def is_scanned_pdf(file_path: str) -> bool:
         print(f"[PDF Classify] Error checking PDF type, assuming text-based: {e}")
         return False
 
-def extract_pdf_tables_with_camelot(file_path: str, base_metadata: Optional[dict] = None) -> list[LCDocument]:
+def extract_pdf_tables_with_camelot(file_path: str, original_filename: str, base_metadata: Optional[dict] = None) -> list[LCDocument]:
     """Extract tables from a PDF using Camelot for higher accuracy."""
     documents: list[LCDocument] = []
     try:
@@ -471,7 +472,7 @@ def extract_pdf_tables_with_camelot(file_path: str, base_metadata: Optional[dict
         for t in tables:
             tsv = t.df.to_csv(sep='\t', index=False, header=True)
             if tsv.strip():
-                md_base = {"source": os.path.basename(file_path), "type": "pdf", "page": t.page}
+                md_base = {"source": original_filename, "type": "pdf", "page": t.page}
                 if base_metadata:
                     md_base.update(base_metadata)
                 md = {**md_base, "block_type": "table", "extraction_method": "camelot"}
@@ -495,12 +496,12 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
             if not scanned:
                 # --- TEXT-BASED PDF PIPELINE (CAMELOT FIRST) ---
                 # 1. Prioritize table extraction with Camelot for higher accuracy
-                camelot_tables = extract_pdf_tables_with_camelot(file_path, base_metadata)
+                camelot_tables = extract_pdf_tables_with_camelot(file_path, original_filename, base_metadata)
                 documents.extend(camelot_tables)
 
                 # 2. Get text blocks from pdfplumber, but IGNORE its table extraction
                 # to prevent duplicating data poorly extracted from tables.
-                plumber_blocks = extract_pdf_blocks_with_tables(file_path, base_metadata)
+                plumber_blocks = extract_pdf_blocks_with_tables(file_path, original_filename, base_metadata)
                 text_blocks = [b for b in plumber_blocks if getattr(b, 'metadata', {}).get('block_type') == 'text']
                 documents.extend(text_blocks)
 
@@ -511,7 +512,7 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
                     chunks = _layout_aware_chunk_blocks(validated_docs)
                     for i, ch in enumerate(chunks):
                         md = getattr(ch, 'metadata', {}) or {}
-                        md.update({'chunk_index': i})
+                        md.update({'chunk_index': i, 'source': original_filename})
                         ch.metadata = md
                     if chunks:
                         return chunks  # Return early with high-quality extracted content
@@ -531,7 +532,7 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
                         # Try detect simple tables and keep as extra block if found
                         tsv = detect_tsv_from_ocr_lines(ocr_text)
                         if tsv:
-                            md_table = {"source": os.path.basename(file_path), "type": "pdf", "page": idx + 1, "block_type": "table", "ocr_confidence": conf}
+                            md_table = {"source": original_filename, "type": "pdf", "page": idx + 1, "block_type": "table", "ocr_confidence": conf}
                             if base_metadata:
                                 md_table.update(base_metadata)
                             documents.append(LCDocument(page_content=tsv, metadata=md_table))
@@ -544,13 +545,13 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
                         if not documents: # Only add text blocks if no tables were found for same page
                             if pages_md and len(pages_md) == len(pieces):
                                 for i, t in enumerate(pieces):
-                                    md = {"source": os.path.basename(file_path), "type": "pdf", "page": pages_md[i]["page" ], "block_type": "text", "ocr_confidence": pages_md[i]["ocr_confidence"]}
+                                    md = {"source": original_filename, "type": "pdf", "page": pages_md[i]["page" ], "block_type": "text", "ocr_confidence": pages_md[i]["ocr_confidence"]}
                                     if base_metadata:
                                         md.update(base_metadata)
                                     documents.append(LCDocument(page_content=t, metadata=md))
                             else:
                                 text = "\n".join(pieces).strip()
-                                md = {"source": os.path.basename(file_path), "type": "pdf", "block_type": "text"}
+                                md = {"source": original_filename, "type": "pdf", "block_type": "text"}
                                 if base_metadata:
                                     md.update(base_metadata)
                                 documents.append(LCDocument(page_content=text, metadata=md))
@@ -592,14 +593,14 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
                         for pg, t in pages_text:
                             if not t:
                                 continue
-                            md = {"source": os.path.basename(file_path), "type": "pdf", "page": pg}
+                            md = {"source": original_filename, "type": "pdf", "page": pg}
                             if base_metadata:
                                 md.update(base_metadata)
                             documents.append(LCDocument(page_content=t, metadata=md))
                         if not documents:
                             combined = "\n".join(texts).strip()
                             if combined:
-                                md = {"source": os.path.basename(file_path), "type": "pdf"}
+                                md = {"source": original_filename, "type": "pdf"}
                                 if base_metadata:
                                     md.update(base_metadata)
                                 documents = [LCDocument(page_content=combined, metadata=md)]
@@ -609,9 +610,9 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
 
             if not documents:
                 # Fallback: placeholder document if everything failed
-                text = text or f"Tài liệu PDF: {os.path.basename(file_path)}\nKhông thể trích xuất nội dung text tự động. Có thể là file scan hoặc PDF được bảo vệ."
+                text = text or f"Tài liệu PDF: {original_filename}\nKhông thể trích xuất nội dung text tự động. Có thể là file scan hoặc PDF được bảo vệ."
                 print(f"[WARNING] Could not extract text from PDF: {file_path}")
-                md = {"source": os.path.basename(file_path), "type": "pdf"}
+                md = {"source": original_filename, "type": "pdf"}
                 if base_metadata:
                     md.update(base_metadata)
                 documents = [LCDocument(page_content=text, metadata=md)]
@@ -637,7 +638,7 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
                 # Use the same layout-aware logic as PDFs for high-quality text chunking
                 paragraphs = _split_paragraphs(content)
                 doc_blocks = []
-                md = {"source": os.path.basename(file_path), "type": file_type, "block_type": "text"}
+                md = {"source": original_filename, "type": file_type, "block_type": "text"}
                 if base_metadata:
                     md.update(base_metadata)
                 for p in paragraphs:
@@ -682,7 +683,7 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
                 # Detect tables in OCR output
                 documents = []
                 tsv_table = detect_tsv_from_ocr_lines(text)
-                md = {"source": os.path.basename(file_path), "type": "image", "ocr_confidence": confidence}
+                md = {"source": original_filename, "type": "image", "ocr_confidence": confidence}
                 if base_metadata:
                     md.update(base_metadata)
 
@@ -720,8 +721,8 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
                     pieces.append(sheet_text)
                 text = ("\n\n".join(pieces)).strip()
                 if not text:
-                    text = f"Bảng tính rỗng: {os.path.basename(file_path)}"
-                md = {"source": os.path.basename(file_path), "type": "excel"}
+                    text = f"Bảng tính rỗng: {original_filename}"
+                md = {"source": original_filename, "type": "excel"}
                 if base_metadata:
                     md.update(base_metadata)
                 documents = [LCDocument(page_content=text, metadata=md)]
@@ -739,7 +740,7 @@ def process_file_content(db: Session, file_path: str, file_type: str, original_f
                 header = "\t".join([str(c) for c in df.columns.tolist()])
                 rows = ["\t".join([str(v) for v in row]) for row in df.values.tolist()]
                 text = header + "\n" + "\n".join(rows)
-                md = {"source": os.path.basename(file_path), "type": "csv"}
+                md = {"source": original_filename, "type": "csv"}
                 if base_metadata:
                     md.update(base_metadata)
                 documents = [LCDocument(page_content=text, metadata=md)]
