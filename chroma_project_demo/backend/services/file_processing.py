@@ -1,10 +1,10 @@
 import os
 import uuid
+
+
 from sqlalchemy.orm import Session
-from database import Document, DocumentChunk, OcrText, get_db
-from routers.files import process_file_content, _normalize_vi, clean_ocr_text
-from langchain_community.embeddings import OllamaEmbeddings
-import chromadb
+from database import Document, DocumentChunk, OcrText, get_db, get_chroma_collection_for_backend
+from routers.files import process_file_content, _normalize_vi, clean_ocr_text, _embed_texts
 
 # This function will be executed by the RQ worker.
 def process_file_and_embed(file_path: str, document_id: str):
@@ -16,24 +16,34 @@ def process_file_and_embed(file_path: str, document_id: str):
             return
 
         # Reuse the existing processing logic
-        chunks = process_file_content(db, file_path, document.file_type, base_metadata={})
+        chunks = process_file_content(db, file_path, document.file_type, document.filename, base_metadata={})
 
         if not chunks:
             document.status = "failed"
             db.commit()
             return
 
+
+
+
         texts = [getattr(ch, 'page_content', '') for ch in chunks]
         metadatas = [getattr(ch, 'metadata', {}) for ch in chunks]
-        
-        # Embedding logic (simplified for worker context)
-        # In a real app, this would be more robust, handling different backends.
-        embeddings_model = OllamaEmbeddings(model=os.getenv("OLLAMA_EMBED_MODEL", "llama2"))
-        chunk_embeddings = embeddings_model.embed_documents(texts)
+
+        # Embedding logic using the centralized function from routers.files
+        chunk_embeddings = _embed_texts(texts)
+        if not chunk_embeddings:
+            raise ValueError("Failed to generate embeddings for document chunks.")
+
+        # Get the correct ChromaDB collection using the centralized function
+        # This ensures the worker writes to the same DB the app reads from.
+        emb_dim = len(chunk_embeddings[0])
+        # Simple backend detection based on environment
+        backend = "openai" if os.getenv("USE_OPENAI", "0") == "1" else "ollama"
+        collection = get_chroma_collection_for_backend(backend, emb_dim)
+        if not collection:
+            raise RuntimeError("Could not get ChromaDB collection. Check ChromaDB connection.")
 
         # Add to ChromaDB
-        chroma_client = chromadb.PersistentClient(path="./chroma_db")
-        collection = chroma_client.get_or_create_collection(name=os.getenv("CHROMA_COLLECTION", "documents"))
         ids = [str(uuid.uuid4()) for _ in texts]
         collection.add(embeddings=chunk_embeddings, documents=texts, metadatas=metadatas, ids=ids)
 
@@ -41,17 +51,17 @@ def process_file_and_embed(file_path: str, document_id: str):
         document.status = "completed"
         for cid in ids:
             db.add(DocumentChunk(document_id=document.id, chunk_id=cid, collection=collection.name))
-        
+
         # Save OCR text if any
         for chunk in chunks:
             md = getattr(chunk, 'metadata', {})
             content = getattr(chunk, 'page_content', '')
             if md.get('block_type') in ['text', 'table'] and content:
                 db.add(OcrText(
-                    document_id=document.id, 
-                    source_filename=document.filename, 
-                    page=md.get('page'), 
-                    content=content, 
+                    document_id=document.id,
+                    source_filename=document.filename,
+                    page=md.get('page'),
+                    content=content,
                     normalized_content=_normalize_vi(clean_ocr_text(content))
                 ))
 

@@ -22,6 +22,7 @@ from typing import Optional, List
 import json
 
 import pandas as pd
+import tiktoken
 from io import StringIO
 
 from PIL import Image
@@ -92,8 +93,10 @@ if USE_OPENAI:
 # Toggle debug logs (set DEBUG_LOGS=1 in .env to enable)
 DEBUG_LOGS = os.getenv("DEBUG_LOGS", "0") == "1"
 # Strict RAG mode: if enabled, refuse to answer when no relevant context is found
-# Default OFF to ensure the assistant still answers even when retrieval misses context.
-STRICT_CONTEXT_ONLY = os.getenv("STRICT_CONTEXT_ONLY", "0") == "1"
+# Default ON to prioritize internal knowledge and avoid hallucinations; can be disabled via env
+STRICT_CONTEXT_ONLY = os.getenv("STRICT_CONTEXT_ONLY", "1") == "1"
+# Allow web search fallback only when explicitly enabled
+ALLOW_WEB_SEARCH = os.getenv("ALLOW_WEB_SEARCH", "0") == "1"
 
 # ---- Runtime System Config loader (from DB) ----
 from database import SessionLocal, SystemConfig  # type: ignore
@@ -117,10 +120,18 @@ def _get_system_config_map(force: bool = False) -> dict:
         return _config_cache.get("map", {})
 
 def _cfg_chat_model(default: str | None = None) -> str:
+    # Priority: Env Var > DB Config > Code Default
+    env_model = os.getenv("OPENAI_CHAT_MODEL")
+    if env_model:
+        return env_model
     m = _get_system_config_map()
-    return m.get("chat_model") or default or OPENAI_CHAT_MODEL
+    return m.get("chat_model") or default or "gpt-4o-mini" # Updated default
 
 def _cfg_embed_model(default: str | None = None) -> str:
+    # Priority: Env Var > DB Config > Code Default
+    env_model = os.getenv("OPENAI_EMBED_MODEL")
+    if env_model:
+        return env_model
     m = _get_system_config_map()
     return m.get("embed_model") or default or OPENAI_EMBED_MODEL
 
@@ -198,6 +209,7 @@ def _get_gemini_service_safe():
 from services.cache import qa_cache_get, qa_cache_set
 from services.llm_provider import get_chat_response
 router = APIRouter()
+
 security = HTTPBearer()
 
 # Verify user using HTTP Bearer like users router
@@ -234,16 +246,40 @@ def _is_ephemeral_history_user(user: User) -> bool:
     except Exception:
         return False
 
+def count_tokens(text: str, model: str = "cl100k_base") -> int:
+    """Counts tokens using tiktoken."""
+    if not text:
+        return 0
+    try:
+        # Most OpenAI models use this encoding
+        encoding = tiktoken.get_encoding(model)
+        return len(encoding.encode(text))
+    except Exception:
+        # Fallback for models that don't have a tiktoken encoding or other errors
+        return len(text) // 4
+
 # Pydantic models
 class ChatMessageRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
-
 class ChatMessageResponse(BaseModel):
     id: str
     message: str
     response: str
     timestamp: datetime
+
+# Helper for token counting
+def _count_tokens(text: str, model: str = "cl100k_base") -> int:
+    """Returns the number of tokens in a text string."""
+    if not text:
+        return 0
+    try:
+        # Most OpenAI models use this encoding
+        encoding = tiktoken.get_encoding(model)
+        return len(encoding.encode(text))
+    except Exception:
+        # Fallback for models that don't have a tiktoken encoding or other errors
+        return len(text) // 4
     session_id: str
     sources: Optional[List[dict]] = None
     suggestions: Optional[List[str]] = None
@@ -370,6 +406,8 @@ def _requires_internal_docs(msg: str) -> bool:
 
 def _should_try_web_search(msg: str) -> bool:
     """Decide if a query is suitable for a web search fallback."""
+    if not ALLOW_WEB_SEARCH:
+        return False
     if not msg or not isinstance(msg, str):
         return False
     # If it requires internal docs, don't web search
@@ -1145,7 +1183,7 @@ def get_relevant_context(message: str, collection) -> str:
         try:
             query_vec = _encode_query(message)
             print(f"[Chat] Query embedding generated: {len(query_vec)} dimensions")
-            dense_results = collection.query(query_embeddings=[query_vec], n_results=8)
+            dense_results = collection.query(query_embeddings=[query_vec], n_results=16)
             dense_docs = dense_results.get('documents', [[]])[0] if dense_results else []
             candidates.extend([d for d in dense_docs if d])
             dlog(f"[Chat] Dense search found {len(dense_docs)} documents")
@@ -2034,6 +2072,55 @@ async def clear_context_file(
 
 
 
+def _save_message_pair(db: Session, session: ChatSession, user_message: str, ai_response: str, sources: list[dict] | None, user_id: int, tokens_used: int = 0, response_time_ms: int = 0) -> ChatMessage | None:
+    """Saves the user message and AI response to the database, returning the AI message object."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if _is_ephemeral_history_user(user):
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        user_msg = ChatMessage(
+            id=str(uuid.uuid4()),
+            session_id=session.id,
+            message=user_message,
+            response="",
+            is_user=True,
+            timestamp=now
+        )
+        db.add(user_msg)
+
+        ai_msg = ChatMessage(
+            id=str(uuid.uuid4()),
+            session_id=session.id,
+            message="",
+            response=ai_response,
+            is_user=False,
+            timestamp=now,
+            sources=json.dumps(sources, ensure_ascii=False) if sources else None,
+            tokens_used=tokens_used,
+            response_time=response_time_ms
+        )
+        db.add(ai_msg)
+
+        if tokens_used > 0:
+            token_usage_record = TokenUsage(
+                user_id=user_id,
+                tokens_used=tokens_used,
+                timestamp=now
+            )
+            db.add(token_usage_record)
+            db.commit()
+
+        session.updated_at = now
+        db.add(session)
+        db.commit()
+        db.refresh(ai_msg)
+        return ai_msg
+    except Exception as e:
+        print(f"[Chat] Save message pair failed: {e}")
+        db.rollback()
+        return None
+
 @router.post("/send", response_model=ChatMessageResponse)
 async def send_message(
     request: ChatMessageRequest,
@@ -2201,13 +2288,19 @@ async def send_message(
 
 
             # Combine contexts: structured first, vector as supplemental
-            merged_contexts = []
-            merged_contexts.extend([m.strip() for m in structured_parts if m and m.strip()])
+            # Combine contexts: If we have structured results, prioritize them and only use vector as a fallback.
+            # Final assembly of context
+            # SQL context is primary, vector is supplemental
+            final_context_parts = []
+            all_sources = [] # Reset sources to assemble them correctly
+            if structured_parts:
+                final_context_parts.append("Dữ liệu tra cứu từ cơ sở dữ liệu (Nguồn tin chính xác nhất):\n" + "\n\n".join(structured_parts))
+                all_sources.extend(structured_sources)
             if vector_context:
-                merged_contexts.append(vector_context)
-            final_context = "\n\n".join(merged_contexts)
+                final_context_parts.append("Thông tin bổ sung từ tài liệu:\n" + vector_context)
+                all_sources.extend(vector_sources or [])
 
-            all_sources = structured_sources + (vector_sources or [])
+            final_context = "\n\n---\n\n".join(final_context_parts).strip()
 
 
             # (Fallback Agent) If no internal context is found, try a web search as a last resort
@@ -2272,46 +2365,9 @@ async def send_message(
                 suggestions=suggestions
             )
         else:
-            # Save user message
-            user_message = ChatMessage(
-                id=str(uuid.uuid4()),
-                session_id=session.id,
-                message=request.message,
-                response="",  # do not duplicate AI reply on user row
-                is_user=True,
-                timestamp=datetime.now(timezone.utc),
-                tokens_used=tokens_used,
-                response_time=response_time_ms
-            )
-            db.add(user_message)
+            ai_message = _save_message_pair(db, session, request.message, ai_text, all_sources, user.id, tokens_used, response_time_ms)
 
-            # Save AI response
-            ai_message = ChatMessage(
-                id=str(uuid.uuid4()),
-                session_id=session.id,
-                message="",
-                response=ai_text,
-                is_user=False,
-                timestamp=datetime.now(timezone.utc),
-                tokens_used=tokens_used,
-                response_time=response_time_ms,
-                sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None
-            )
-            db.add(ai_message)
-
-            # Record token usage
-            token_usage_record = TokenUsage(
-                user_id=user.id,
-                tokens_used=tokens_used,
-                timestamp=datetime.now(timezone.utc)
-            )
-            db.add(token_usage_record)
-
-            # Update session
-            session.updated_at = datetime.now(timezone.utc)
-
-            db.commit()
-            # Auto-title the session (first turn)
+            # Attempt to auto-generate a title for new sessions
             try:
                 default_title = request.message[:50] + ("..." if len(request.message) > 50 else "")
                 if (not session.title) or session.title in ("Đoạn Chat", default_title) or session.title.startswith((request.message or "")[:20]):
@@ -2324,12 +2380,13 @@ async def send_message(
                 print(f"[Chat] Auto-title failed: {_e}")
 
             return ChatMessageResponse(
-                id=ai_message.id,
+                id=ai_message.id if ai_message else str(uuid.uuid4()),
                 message=request.message,
                 response=ai_text,
-                timestamp=ai_message.timestamp,
+                timestamp=ai_message.timestamp if ai_message else datetime.now(timezone.utc),
                 session_id=session.id,
-                sources=all_sources
+                sources=all_sources,
+                suggestions=suggestions
             )
 
 
@@ -2596,6 +2653,7 @@ async def send_message_with_files(
         timestamp=datetime.now(timezone.utc)
     )
     db.add(token_usage_record)
+    db.commit()
 
     session.updated_at = datetime.now(timezone.utc)
 
@@ -2802,33 +2860,8 @@ async def stream_message(
     merged_contexts = []
 
     # Quick path: exact/fuzzy FAQ match (answer without calling LLM)
-    try:
-        faq_ans, faq_source = _best_faq_match(db, req.message)
-    except Exception:
-        faq_ans, faq_source = (None, None)
 
-    if faq_ans:
-        ai_text = faq_ans.strip()
-        now = datetime.now(timezone.utc)
-        sources = [faq_source] if faq_source else []
 
-        async def faq_streamer():
-            yield ai_text.encode("utf-8")
-
-        # Save to DB before returning
-        if not _is_ephemeral_history_user(user):
-            try:
-                user_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message=req.message, response="", is_user=True, timestamp=now)
-                db.add(user_msg)
-                ai_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message="", response=ai_text, is_user=False, timestamp=now, sources=json.dumps(sources, ensure_ascii=False) if sources else None)
-                db.add(ai_msg)
-                session.updated_at = now
-                db.commit()
-            except Exception as e:
-                print(f"[Chat] DB save failed for FAQ response: {e}")
-                db.rollback()
-
-        return StreamingResponse(faq_streamer(), media_type="text/event-stream")
 
     if crm_ctx: merged_contexts.append(crm_ctx)
     if ocr_ctx: merged_contexts.append(ocr_ctx)
@@ -2844,68 +2877,112 @@ async def stream_message(
             sid_line = f"<<SID:{session.id}>>"
             yield sid_line.encode("utf-8")
 
+            # Path 1: Handle greetings
             if _is_greeting(req.message):
                 full_text = "Xin chào! Mình là trợ lý AI nội bộ của DalatHasfarm. Mình có thể hỗ trợ bạn tra cứu thông tin hoặc giải đáp công việc gì hôm nay?"
                 yield full_text.encode("utf-8")
-            elif STRICT_CONTEXT_ONLY and not (final_context and final_context.strip()) and _requires_internal_docs(req.message):
+                return
+
+            # Path 2: Handle strict mode with no context
+            if STRICT_CONTEXT_ONLY and not final_context.strip() and _requires_internal_docs(req.message):
                 full_text = "Xin lỗi, mình chưa tìm thấy thông tin liên quan trong tài liệu nội bộ để trả lời câu hỏi này."
                 yield full_text.encode("utf-8")
-            else:
-                buffer: list[str] = []
-                if USE_OPENAI and openai_client:
-                    try:
-                        summary_context = f"Tóm tắt cuộc trò chuyện trước:\n{session.summary}\n\n---\n\n" if (session and session.summary) else ""
-                        user_prompt = (
-                            f"{summary_context}Thông tin từ tài liệu:\n{final_context}\n\nCâu hỏi: {req.message}"
-                            if final_context.strip() else f"{summary_context}{req.message}"
-                        )
-                        messages = [{"role": "system", "content": "Bạn là một trợ lý AI chuyên nghiệp..."}]
-                        if history: messages.extend(history[-HISTORY_MAX_HISTORY_MESSAGES:])
-                        messages.append({"role": "user", "content": user_prompt})
-                        # Retry with exponential backoff and enforce timeout/cancellation
-                        attempt = 0
-                        deadline = time.time() + STREAM_TIMEOUT_SECONDS
-                        while attempt < RETRY_MAX_ATTEMPTS and time.time() < deadline:
-                            try:
-                                stream = openai_client.chat.completions.create(model=OPENAI_CHAT_MODEL, messages=messages, stream=True)
-                                for ev in stream:
-                                    delta = getattr(getattr(ev.choices[0], 'delta', None), 'content', None)
-                                    if delta:
-                                        buffer.append(delta)
-                                        yield delta.encode("utf-8")
-                                    # Client disconnected?
-                                    if await http.is_disconnected():
-                                        print("[Chat] client disconnected during stream; canceling")
-                                        break
-                                    # Timeout?
-                                    if time.time() >= deadline:
-                                        print("[Chat] stream timed out")
-                                        break
-                                if buffer:
-                                    break  # success
-                            except Exception as e:
-                                print(f"[Stream] Attempt {attempt+1} failed: {e}")
-                                delay = RETRY_BASE_DELAY * (2 ** attempt)
-                                await asyncio.sleep(min(delay, 5))
-                                attempt += 1
-                        full_text = "".join(buffer).strip()
+                return
+
+            # Path 3: No context found, try FAQ as a fallback
+            if not final_context.strip():
+                try:
+                    faq_ans, faq_source = _best_faq_match(db, req.message)
+                    if faq_ans:
+                        full_text = faq_ans.strip()
+                        if faq_source: all_sources.append(faq_source)
+                        yield full_text.encode("utf-8")
+                        return  # End generator, will be saved in `finally`
+                except Exception as e:
+                    print(f"[Chat] Fallback FAQ check failed: {e}")
+                # If FAQ has no match, fall through to the general LLM call below
+
+            # Path 4 (Default): Context exists, or no context and no FAQ match. Call LLM.
+            buffer: list[str] = []
+            if USE_OPENAI and openai_client:
+                try:
+                    summary_context = f"Tóm tắt cuộc trò chuyện trước:\n{session.summary}\n\n---\n\n" if (session and session.summary) else ""
+                    user_prompt = (
+                        f"{summary_context}Thông tin từ tài liệu:\n{final_context}\n\nCâu hỏi: {req.message}"
+                        if final_context.strip() else f"{summary_context}{req.message}"
+                    )
+                    messages = [{"role": "system", "content": "Bạn là một trợ lý AI chuyên nghiệp, hữu ích và thân thiện của Dalat Hasfarm."}]
+                    if history: messages.extend(history[-HISTORY_MAX_HISTORY_MESSAGES:])
+                    messages.append({"role": "user", "content": user_prompt})
+
+                    attempt = 0
+                    deadline = time.time() + STREAM_TIMEOUT_SECONDS
+                    while attempt < RETRY_MAX_ATTEMPTS and time.time() < deadline:
+                        try:
+                            stream = openai_client.chat.completions.create(model=_cfg_chat_model(), messages=messages, stream=True)
+                            for ev in stream:
+                                delta = getattr(getattr(ev.choices[0], 'delta', None), 'content', None)
+                                if delta:
+                                    buffer.append(delta)
+                                    yield delta.encode("utf-8")
+                                if await http.is_disconnected() or time.time() >= deadline:
+                                    break
+                            if buffer: # If we got any response, break the retry loop
+                                break
+                        except Exception as e:
+                            print(f"[Stream] Attempt {attempt+1} failed: {e}")
+                            attempt += 1
+                            if attempt < RETRY_MAX_ATTEMPTS:
+                                await asyncio.sleep(RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+
+                    full_text = "".join(buffer).strip()
+                    if full_text:
                         try:
                             qa_cache_set(req.message, final_context, {"text": full_text, "intent": "SIMPLE_QA"})
                         except Exception:
-                            pass
-                    except Exception as oe:
-                        print(f"[Chat] OpenAI stream failed: {oe}")
+                            pass # Cache fail is non-critical
 
-                if not full_text:
-                    full_text, _, _ = get_chat_response(req.message, final_context, history=history)
-                    yield full_text.encode("utf-8")
+                except Exception as oe:
+                    print(f"[Chat] OpenAI stream failed: {oe}")
+            # Fallback to non-streaming if streaming failed to produce text
+            if not full_text:
+                full_text, _, _ = get_chat_response(req.message, final_context, history=history)
+                yield full_text.encode("utf-8")
         finally:
-            elapsed = int((time.time() - started) * 1000)
-            if not _is_ephemeral_history_user(user):
-                user_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message=req.message, response="", is_user=True, timestamp=datetime.now(timezone.utc), response_time=elapsed)
+            response_time_ms = int((time.time() - started) * 1000)
+            print(f"[Chat] Stream finished in {response_time_ms}ms. Full text length: {len(full_text)}")
+
+            if not _is_ephemeral_history_user(user) and full_text:
+                # Save user message
+                user_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message=req.message, response="", is_user=True, timestamp=datetime.now(timezone.utc), response_time=response_time_ms)
                 db.add(user_msg)
-                ai_msg = ChatMessage(id=str(uuid.uuid4()), session_id=session.id, message="", response=full_text, is_user=False, timestamp=datetime.now(timezone.utc), sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None)
+
+                # Calculate tokens and save AI message
+                prompt_tokens = count_tokens(req.message)
+                completion_tokens = count_tokens(full_text)
+                tokens_used = prompt_tokens + completion_tokens
+
+                ai_msg = ChatMessage(
+                    id=str(uuid.uuid4()),
+                    session_id=session.id,
+                    message="",
+                    response=full_text,
+                    is_user=False,
+                    timestamp=datetime.now(timezone.utc),
+                    tokens_used=tokens_used,
+                    response_time=response_time_ms,
+                    sources=json.dumps(all_sources, ensure_ascii=False) if all_sources else None
+                )
                 db.add(ai_msg)
+
+                # Save token usage record
+                if tokens_used > 0:
+                    token_usage_record = TokenUsage(
+                        user_id=user.id,
+                        tokens_used=tokens_used,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    db.add(token_usage_record)
 
                 # Update rolling summary for the session
                 try:
@@ -2920,14 +2997,14 @@ async def stream_message(
                 except Exception as _se:
                     print(f"[Chat] Update rolling summary failed (stream): {_se}")
 
+                # Auto-suggest title for new chats
                 try:
-                    if (not session.title) or session.title == "Đoạn Chat" or session.title.startswith(req.message[:20]):
+                    if full_text and ((not session.title) or session.title == "Đoạn Chat" or session.title.startswith(req.message[:20])):
                         new_title = _suggest_chat_title(req.message, full_text)
                         if new_title and new_title != session.title:
                             session.title = new_title
                 except Exception as _e:
                     print(f"[Chat] Auto-title(stream) failed: {_e}")
-
                 session.updated_at = datetime.now(timezone.utc)
                 db.commit()
 

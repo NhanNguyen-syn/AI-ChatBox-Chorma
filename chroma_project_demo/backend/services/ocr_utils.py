@@ -21,6 +21,10 @@ import re
 import unicodedata
 
 
+import numpy as np
+
+
+
 def normalize_vi(s: str) -> str:
     try:
         s = unicodedata.normalize('NFKD', s or '')
@@ -137,7 +141,12 @@ def ocr_with_confidence(pil_img: Image.Image, lang: str = None) -> Tuple[str, Op
         avg_conf = int(sum(valid)/len(valid)) if valid else None
         text = clean_ocr_text(raw_text)
         return text, avg_conf
-    except Exception:
+    except pytesseract.TesseractNotFoundError as e:
+        print(f"[OCR] FATAL: Tesseract is not installed or configured correctly. {e}")
+        # Re-raise this critical error so the caller MUST handle it.
+        raise e
+    except Exception as e:
+        print(f"[OCR] Tesseract failed with a general error: {e}")
         return "", None
 
 

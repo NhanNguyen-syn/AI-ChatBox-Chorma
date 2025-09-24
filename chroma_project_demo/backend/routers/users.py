@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 
-from database import get_db, User
+from database import get_db, User, TokenUsage
 from auth.jwt_handler import verify_token, get_password_hash
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -19,6 +21,11 @@ class UserProfile(BaseModel):
     is_admin: bool
     created_at: datetime
 
+class TokenUsageSummary(BaseModel):
+    used_this_month: int
+    quota: Optional[int] = None
+    percent: float
+
 class UserUpdate(BaseModel):
     email: Optional[str] = None
     full_name: Optional[str] = None
@@ -28,10 +35,10 @@ class UserUpdate(BaseModel):
 def verify_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
     payload = verify_token(credentials.credentials)
     user = db.query(User).filter(User.username == payload["sub"]).first()
-    
+
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="Invalid user")
-    
+
     return user
 
 @router.get("/profile", response_model=UserProfile)
@@ -46,6 +53,26 @@ async def get_user_profile(
         is_admin=user.is_admin,
         created_at=user.created_at
     )
+@router.get("/token-usage", response_model=TokenUsageSummary)
+async def get_token_usage(
+    user: User = Depends(verify_user),
+    db: Session = Depends(get_db)
+):
+    start_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    used = db.query(func.coalesce(func.sum(TokenUsage.tokens_used), 0)).filter(
+        TokenUsage.user_id == user.id,
+        TokenUsage.timestamp >= start_of_month
+    ).scalar() or 0
+    quota = getattr(user, 'token_quota', None)
+    percent = 0.0
+    try:
+        if quota and quota > 0:
+            percent = min(100.0, round((used / quota) * 100.0, 2))
+    except Exception:
+        percent = 0.0
+    return TokenUsageSummary(used_this_month=int(used), quota=quota, percent=percent)
+
+
 
 @router.put("/profile")
 async def update_user_profile(
@@ -60,28 +87,28 @@ async def update_user_profile(
         if existing_user:
             raise HTTPException(status_code=400, detail="Email already registered")
         user.email = user_update.email
-    
+
     # Update full name if provided
     if user_update.full_name:
         user.full_name = user_update.full_name
-    
+
     # Update password if provided
     if user_update.new_password:
         if not user_update.current_password:
             raise HTTPException(status_code=400, detail="Current password required")
-        
+
         # Verify current password
         from auth.jwt_handler import verify_password
         if not verify_password(user_update.current_password, user.hashed_password):
             raise HTTPException(status_code=400, detail="Current password is incorrect")
-        
+
         # Hash new password
         user.hashed_password = get_password_hash(user_update.new_password)
-    
+
     user.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(user)
-    
+
     return {"message": "Profile updated successfully"}
 
 @router.get("/faqs")
@@ -91,7 +118,7 @@ async def get_faqs_for_users(
 ):
     from database import FAQ
     faqs = db.query(FAQ).filter(FAQ.is_active == True).order_by(FAQ.category, FAQ.question).all()
-    
+
     # Group by category
     faq_by_category = {}
     for faq in faqs:
@@ -102,5 +129,5 @@ async def get_faqs_for_users(
             "question": faq.question,
             "answer": faq.answer
         })
-    
-    return faq_by_category 
+
+    return faq_by_category

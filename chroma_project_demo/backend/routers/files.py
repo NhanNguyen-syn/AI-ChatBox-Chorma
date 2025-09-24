@@ -481,30 +481,33 @@ def extract_pdf_tables_with_camelot(file_path: str, base_metadata: Optional[dict
         print(f"[Camelot] Table extraction failed: {e}")
     return documents
 
-def process_file_content(db: Session, file_path: str, file_type: str, base_metadata: Optional[dict] = None) -> List[LCDocument]:
+def process_file_content(db: Session, file_path: str, file_type: str, original_filename: str, base_metadata: Optional[dict] = None) -> List[LCDocument]:
     """Process file content and split into chunks"""
     try:
         documents: List[object] = []
         if file_type == "pdf":
+            text = "" # Initialize text to ensure it exists for fallback logic
+
             # 1. Classify PDF as text-based or scanned
             scanned = is_scanned_pdf(file_path)
 
             # 2. Process based on type
             if not scanned:
-                # --- TEXT-BASED PDF PIPELINE (CAMELOT + PDFPLUMBER) ---
-                # 1. Prioritize table extraction with Camelot
+                # --- TEXT-BASED PDF PIPELINE (CAMELOT FIRST) ---
+                # 1. Prioritize table extraction with Camelot for higher accuracy
                 camelot_tables = extract_pdf_tables_with_camelot(file_path, base_metadata)
                 documents.extend(camelot_tables)
 
-                # 2. Get text blocks from pdfplumber, excluding its tables to avoid duplication
+                # 2. Get text blocks from pdfplumber, but IGNORE its table extraction
+                # to prevent duplicating data poorly extracted from tables.
                 plumber_blocks = extract_pdf_blocks_with_tables(file_path, base_metadata)
-                text_blocks = [b for b in plumber_blocks if getattr(b, 'metadata', {}).get('block_type') != 'table']
+                text_blocks = [b for b in plumber_blocks if getattr(b, 'metadata', {}).get('block_type') == 'text']
                 documents.extend(text_blocks)
 
                 # 3. If we have any content, chunk and return it
                 if documents:
                     validated_docs = validate_numeric_tables(documents)
-                    ingest_allowance_tables_to_sql(db, validated_docs)
+                    ingest_allowance_tables_to_sql(db, validated_docs, original_filename)
                     chunks = _layout_aware_chunk_blocks(validated_docs)
                     for i, ch in enumerate(chunks):
                         md = getattr(ch, 'metadata', {}) or {}
@@ -991,7 +994,7 @@ def ingest_allowance_tables_to_sql(db: Session, docs: list[LCDocument]):
         # Heuristic to find the columns we need
         try:
             khu_vuc_idx = header.index("khu vực")
-            cu_idx = header.index("phụ cấp cũ")
+            cu_idx = header.index("phụ cấp cũ") if "phụ cấp cũ" in header else header.index("phụ cấp hiện tại")
             moi_idx = header.index("phụ cấp mới")
             tang_idx = header.index("mức tăng")
         except ValueError:
@@ -1224,7 +1227,7 @@ async def finish_upload(
             "uploaded_at": datetime.utcnow().isoformat(),
             "file_type": file_extension,
         }
-        chunks = process_file_content(db, final_path, file_extension, base_metadata=base_md)
+        chunks = process_file_content(db, final_path, file_extension, filename, base_metadata=base_md)
     except Exception as e:
         # Clean up file if processing fails
         try:
@@ -1448,9 +1451,9 @@ async def batch_delete_documents(
             paths_to_remove.append(doc.file_path)
         chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).all()
         for chunk in chunks:
-            if chunk.collection_name not in collection_map:
-                collection_map[chunk.collection_name] = []
-            collection_map[chunk.collection_name].append(chunk.id)
+            if chunk.collection not in collection_map:
+                collection_map[chunk.collection] = []
+            collection_map[chunk.collection].append(chunk.chunk_id)
 
     for coll_name, chunk_ids in collection_map.items():
         try:

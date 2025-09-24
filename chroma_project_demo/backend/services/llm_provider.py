@@ -59,8 +59,16 @@ def get_chat_response(
                 continue
 
     system_msg: Optional[Dict[str, str]] = None
-    if context and context.strip():
-        system_msg = {"role": "system", "content": "Bạn là trợ lý AI. Hãy ưu tiên sử dụng CONTEXT để trả lời chính xác và ngắn gọn."}
+    system_prompt = (
+        "Bạn là một trợ lý AI chuyên nghiệp của Dalat Hasfarm. "
+        '**YÊU CẦU BẮT BUỘC:**\n'
+        '1.  **CHỈ DÙNG NGỮ CẢNH:** Trả lời câu hỏi của người dùng **CHỈ DÙNG** thông tin từ mục \'Ngữ cảnh\' được cung cấp. Không được dùng kiến thức ngoài.\n'
+        '2.  **TRÍCH DẪN SỐ LIỆU:** Nếu trong ngữ cảnh có số liệu, bảng biểu, hãy **trích dẫn trực tiếp và chính xác** các thông tin đó.\n'
+        '3.  **NGẮN GỌN, ĐÚNG TRỌNG TÂM:** Câu trả lời phải ngắn gọn, đi thẳng vào vấn đề. Không giải thích dài dòng, không giới thiệu chung chung.\n'
+        "4.  **KHÔNG CÓ THÔNG TIN:** Nếu ngữ cảnh không chứa câu trả lời, hãy nói **DUY NHẤT** câu: 'Tôi không tìm thấy thông tin trong tài liệu.'\n\n"
+        f"Ngữ cảnh:\n---\n{context}\n---"
+    )
+    system_msg = {"role": "system", "content": system_prompt}
 
     for provider in providers:
         try:
@@ -69,7 +77,7 @@ def get_chat_response(
                 if system_msg:
                     msgs.append(system_msg)
                 msgs.extend(safe_history)
-                msgs.append({"role": "user", "content": f"CONTEXT:\n{context}\n\nQUESTION:\n{message}"})
+                msgs.append({"role": "user", "content": message})
 
                 response = openai_client.chat.completions.create(
                     model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o"),

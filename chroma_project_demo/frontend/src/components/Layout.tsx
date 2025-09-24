@@ -138,6 +138,25 @@ interface LayoutProps {
 const Layout: React.FC<LayoutProps> = ({ children }) => {
     const { user, logout } = useAuth()
     const { brandingConfig } = useBranding()
+    // Token usage state
+    const [tokenUsage, setTokenUsage] = React.useState<{ used_this_month: number; quota?: number | null; percent: number } | null>(null)
+    const fmt = (n?: number | null) => new Intl.NumberFormat('en-US').format(n ?? 0)
+
+    React.useEffect(() => {
+        let mounted = true
+        const load = async () => {
+            try {
+                const res = await fetch('/api/users/token-usage', { headers: { Authorization: localStorage.getItem('token') ? `Bearer ${localStorage.getItem('token')}` : '' } })
+                if (!res.ok) return
+                const data = await res.json()
+                if (mounted) setTokenUsage(data)
+            } catch (_) {}
+        }
+        load()
+        const id = setInterval(load, 60_000)
+        return () => { mounted = false; clearInterval(id) }
+    }, [])
+
     const navigate = useNavigate()
 
     // Theme (light/dark)
@@ -212,6 +231,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                                 <span className="hidden sm:inline-block h-2.5 w-2.5 rounded-full bg-secondary-500"></span>
                             </Link>
                         </div>
+
+
 
                         <div className="flex items-center space-x-3 sm:space-x-4">
                             <ThemeSwitch theme={theme} onToggle={toggleTheme} sizePx={12} />

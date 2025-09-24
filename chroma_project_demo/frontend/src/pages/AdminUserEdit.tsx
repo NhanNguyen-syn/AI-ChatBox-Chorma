@@ -35,6 +35,8 @@ const AdminUserEdit: React.FC = () => {
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
 
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
+
   const [form, setForm] = useState({
     full_name: '',
     email: '',
@@ -83,28 +85,38 @@ const AdminUserEdit: React.FC = () => {
   const save = async () => {
     // Password validation
     if (password) {
-        if (password !== confirmPassword) {
-            toast.error('Mật khẩu xác nhận không khớp!')
-            return
-        }
+      if (password !== confirmPassword) {
+        toast.error('Mật khẩu xác nhận không khớp!')
+        return
+      }
     }
 
     setSaving(true)
     try {
-        const payload: any = { ...form };
-        if (password) {
-            payload.new_password = password;
-        }
+      const payload: any = { ...form };
+      if (password) {
+        payload.new_password = password;
+      }
 
-        await api.put(`/admin/users/${id}`, payload)
-        toast.success('Cập nhật người dùng thành công')
-        navigate('/admin/users')
+      await api.put(`/admin/users/${id}`, payload)
+      toast.success('Cập nhật người dùng thành công')
+      navigate('/admin/users')
     } catch (e: any) {
-        toast.error(e?.response?.data?.detail || 'Lưu thất bại')
+      toast.error(e?.response?.data?.detail || 'Lưu thất bại')
     } finally {
-        setSaving(false)
+      setSaving(false)
     }
-}
+  }
+
+  const handleDelete = async () => {
+    try {
+      await api.delete(`/admin/users/${id}`)
+      toast.success('Xóa người dùng thành công')
+      navigate('/admin/users')
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Xóa thất bại')
+    }
+  }
 
   if (loading) {
     return (
@@ -120,167 +132,204 @@ const AdminUserEdit: React.FC = () => {
   const status = (form.account_status || 'active').toLowerCase()
 
   return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-lg shadow p-6 dark:bg-[#0f0f0f] dark:border dark:border-gray-800">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold">Chỉnh sửa User</h2>
-            <p className="text-gray-500">@{user.username}</p>
-          </div>
-          <div className="space-x-2">
-            <button className="btn-secondary" onClick={() => navigate(-1)}>Quay lại</button>
-            <button className="btn-primary" onClick={save} disabled={saving}>Lưu thay đổi</button>
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <>
+      <div className="space-y-6">
         <div className="bg-white rounded-lg shadow p-6 dark:bg-[#0f0f0f] dark:border dark:border-gray-800">
-          <h3 className="font-medium mb-4">Thông tin cơ bản</h3>
-          <div className="space-y-4">
+          <div className="flex items-center justify-between">
             <div>
-              <label className="block text-sm text-gray-600 mb-1">Họ và tên</label>
-              <input className="input-field w-full" name="full_name" value={form.full_name} onChange={handleChange} />
+              <h2 className="text-xl font-semibold">Chỉnh sửa User</h2>
+              <p className="text-gray-500">@{user.username}</p>
             </div>
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Email</label>
-              <input className="input-field w-full" name="email" value={form.email} onChange={handleChange} />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Số điện thoại (tùy chọn)</label>
-              <input className="input-field w-full" name="phone" value={form.phone} onChange={handleChange} />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Staff code / Mã nhân sự</label>
-              <input className="input-field w-full" name="username" value={form.username} onChange={handleChange} disabled={lockSuper} />
+            <div className="space-x-2">
+              <button className="btn-secondary" onClick={() => navigate(-1)}>Quay lại</button>
+              <button className="btn-primary" onClick={save} disabled={saving}>Lưu thay đổi</button>
             </div>
           </div>
         </div>
 
-        <div className="bg-white rounded-lg shadow p-6 dark:bg-[#0f0f0f] dark:border dark:border-gray-800">
-          <h3 className="font-medium mb-4">Quyền và trạng thái</h3>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Vai trò</label>
-              <select className="input-field w-full" name="role" value={form.role} onChange={handleChange} disabled={lockSuper}>
-                <option value="admin">Admin</option>
-                <option value="manager">Manager</option>
-                <option value="user">User</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Phòng ban / Bộ phận</label>
-              <input className="input-field w-full" name="department" value={form.department} onChange={handleChange} />
-            </div>
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="block text-sm text-gray-600">Trạng thái tài khoản</label>
-                <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${STATUS_COLORS[status] || ''}`}>
-                  {status === 'active' ? 'Hoạt động' : status === 'inactive' ? 'Bị khóa' : 'Tạm ngưng'}
-                </span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="bg-white rounded-lg shadow p-6 dark:bg-[#0f0f0f] dark:border dark:border-gray-800">
+            <h3 className="font-medium mb-4">Thông tin cơ bản</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Họ và tên</label>
+                <input className="input-field w-full" name="full_name" value={form.full_name} onChange={handleChange} />
               </div>
-              <div className="inline-flex border rounded-md overflow-hidden bg-white dark:bg-transparent dark:border-gray-700">
-                <button
-                  type="button"
-                  disabled={lockSuper}
-                  onClick={() => setForm((f) => ({ ...f, account_status: 'active' }))}
-                  className={`px-3 py-2 text-sm font-medium border-r focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
-                    status === 'active'
-                      ? 'bg-green-50 text-green-700 border-green-300'
-                      : 'bg-white text-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800'
-                  } ${lockSuper ? 'opacity-60 cursor-not-allowed' : ''}`}
-                >
-                  Active
-                </button>
-                <button
-                  type="button"
-                  disabled={lockSuper}
-                  onClick={() => setForm((f) => ({ ...f, account_status: 'inactive' }))}
-                  className={`px-3 py-2 text-sm font-medium border-r focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
-                    status === 'inactive'
-                      ? 'bg-orange-50 text-orange-700 border-orange-300'
-                      : 'bg-white text-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800'
-                  } ${lockSuper ? 'opacity-60 cursor-not-allowed' : ''}`}
-                >
-                  Inactive
-                </button>
-                <button
-                  type="button"
-                  disabled={lockSuper}
-                  onClick={() => setForm((f) => ({ ...f, account_status: 'suspended' }))}
-                  className={`px-3 py-2 text-sm font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
-                    status === 'suspended'
-                      ? 'bg-yellow-50 text-yellow-700 border-yellow-300'
-                      : 'bg-white text-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800'
-                  } ${lockSuper ? 'opacity-60 cursor-not-allowed' : ''}`}
-                >
-                  Suspended
-                </button>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Email</label>
+                <input className="input-field w-full" name="email" value={form.email} onChange={handleChange} />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Số điện thoại (tùy chọn)</label>
+                <input className="input-field w-full" name="phone" value={form.phone} onChange={handleChange} />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Staff code / Mã nhân sự</label>
+                <input className="input-field w-full" name="username" value={form.username} onChange={handleChange} disabled={lockSuper} />
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-600">
-              <div className="bg-gray-50 dark:bg-gray-800/40 rounded-md p-3">
-                <div className="flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-full bg-green-100 text-green-700 flex items-center justify-center shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4"><path d="M12 8a.75.75 0 01.75.75V12c0 .199-.079.39-.22.53l-2 2a.75.75 0 11-1.06-1.06l1.72-1.72V8.75A.75.75 0 0112 8z"/><path fillRule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25zm-8.25 9.75a8.25 8.25 0 1116.5 0 8.25 8.25 0 01-16.5 0z" clipRule="evenodd"/></svg>
+          </div>
+
+          <div className="bg-white rounded-lg shadow p-6 dark:bg-[#0f0f0f] dark:border dark:border-gray-800">
+            <h3 className="font-medium mb-4">Quyền và trạng thái</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Vai trò</label>
+                <select className="input-field w-full" name="role" value={form.role} onChange={handleChange} disabled={lockSuper}>
+                  <option value="admin">Admin</option>
+                  <option value="manager">Manager</option>
+                  <option value="user">User</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Phòng ban / Bộ phận</label>
+                <input className="input-field w-full" name="department" value={form.department} onChange={handleChange} />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm text-gray-600">Trạng thái tài khoản</label>
+                  <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${STATUS_COLORS[status] || ''}`}>
+                    {status === 'active' ? 'Hoạt động' : status === 'inactive' ? 'Bị khóa' : 'Tạm ngưng'}
+                  </span>
+                </div>
+                <div className="inline-flex border rounded-md overflow-hidden bg-white dark:bg-transparent dark:border-gray-700">
+                  <button
+                    type="button"
+                    disabled={lockSuper}
+                    onClick={() => setForm((f) => ({ ...f, account_status: 'active' }))}
+                    className={`px-3 py-2 text-sm font-medium border-r focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
+                      status === 'active'
+                        ? 'bg-green-50 text-green-700 border-green-300'
+                        : 'bg-white text-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800'
+                    } ${lockSuper ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    Active
+                  </button>
+                  <button
+                    type="button"
+                    disabled={lockSuper}
+                    onClick={() => setForm((f) => ({ ...f, account_status: 'inactive' }))}
+                    className={`px-3 py-2 text-sm font-medium border-r focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
+                      status === 'inactive'
+                        ? 'bg-orange-50 text-orange-700 border-orange-300'
+                        : 'bg-white text-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800'
+                    } ${lockSuper ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    Inactive
+                  </button>
+                  <button
+                    type="button"
+                    disabled={lockSuper}
+                    onClick={() => setForm((f) => ({ ...f, account_status: 'suspended' }))}
+                    className={`px-3 py-2 text-sm font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
+                      status === 'suspended'
+                        ? 'bg-yellow-50 text-yellow-700 border-yellow-300'
+                        : 'bg-white text-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800'
+                    } ${lockSuper ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    Suspended
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-600">
+                <div className="bg-gray-50 dark:bg-gray-800/40 rounded-md p-3">
+                  <div className="flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-full bg-green-100 text-green-700 flex items-center justify-center shrink-0">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4"><path d="M12 8a.75.75 0 01.75.75V12c0 .199-.079.39-.22.53l-2 2a.75.75 0 11-1.06-1.06l1.72-1.72V8.75A.75.75 0 0112 8z"/><path fillRule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25zm-8.25 9.75a8.25 8.25 0 1116.5 0 8.25 8.25 0 01-16.5 0z" clipRule="evenodd"/></svg>
+                    </div>
+                    <div>
+                      <div className="text-gray-500 text-xs uppercase tracking-wide">Ngày tạo tài khoản</div>
+                      <div className="font-medium">{new Date(user.created_at).toLocaleString('vi-VN')}</div>
+                    </div>
                   </div>
-                  <div>
-                    <div className="text-gray-500 text-xs uppercase tracking-wide">Ngày tạo tài khoản</div>
-                    <div className="font-medium">{new Date(user.created_at).toLocaleString('vi-VN')}</div>
+                </div>
+                <div className="bg-gray-50 dark:bg-gray-800/40 rounded-md p-3">
+                  <div className="flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4"><path d="M6.75 3A.75.75 0 016 3.75V5H4.5A2.25 2.25 0 002.25 7.25v11A2.25 2.25 0 004.5 20.5h15a2.25 2.25 0 002.25-2.25v-11A2.25 2.25 0 0019.5 5H18V3.75a.75.75 0 00-1.5 0V5h-9V3.75A.75.75 0 006.75 3z"/><path d="M20.25 8.5H3.75v9a.75.75 0 00.75.75h15a.75.75 0 00.75-.75v-9z"/></svg>
+                    </div>
+                    <div>
+                      <div className="text-gray-500 text-xs uppercase tracking-wide">Lần đăng nhập gần nhất</div>
+                      <div className="font-medium">{user.last_login ? new Date(user.last_login).toLocaleString('vi-VN') : '—'}</div>
+                    </div>
                   </div>
                 </div>
               </div>
-              <div className="bg-gray-50 dark:bg-gray-800/40 rounded-md p-3">
-                <div className="flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4"><path d="M6.75 3A.75.75 0 016 3.75V5H4.5A2.25 2.25 0 002.25 7.25v11A2.25 2.25 0 004.5 20.5h15a2.25 2.25 0 002.25-2.25v-11A2.25 2.25 0 0019.5 5H18V3.75a.75.75 0 00-1.5 0V5h-9V3.75A.75.75 0 006.75 3z"/><path d="M20.25 8.5H3.75v9a.75.75 0 00.75.75h15a.75.75 0 00.75-.75v-9z"/></svg>
-                  </div>
-                  <div>
-                    <div className="text-gray-500 text-xs uppercase tracking-wide">Lần đăng nhập gần nhất</div>
-                    <div className="font-medium">{user.last_login ? new Date(user.last_login).toLocaleString('vi-VN') : '—'}</div>
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      {/* Password Reset Section */}
-      <div className="bg-white rounded-lg shadow p-6 dark:bg-[#0f0f0f] dark:border dark:border-gray-800">
-        <h3 className="font-medium mb-4">Đặt lại mật khẩu</h3>
-        <button type="button" className="btn-secondary" onClick={() => setShowPassword((s) => !s)}>
-          {showPassword ? 'Ẩn ô đổi mật khẩu' : 'Đổi mật khẩu'}
-        </button>
-        {showPassword && (
-          <div className="grid grid-cols-2 gap-4 mt-4">
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Mật khẩu mới</label>
-              <input
-                type="password"
-                className="input-field w-full"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Nhập mật khẩu mới"
-              />
+        {/* Password Reset Section */}
+        <div className="bg-white rounded-lg shadow p-6 dark:bg-[#0f0f0f] dark:border dark:border-gray-800">
+          <h3 className="font-medium mb-4">Đặt lại mật khẩu</h3>
+          <button type="button" className="btn-secondary" onClick={() => setShowPassword((s) => !s)}>
+            {showPassword ? 'Ẩn ô đổi mật khẩu' : 'Đổi mật khẩu'}
+          </button>
+          {showPassword && (
+            <div className="grid grid-cols-2 gap-4 mt-4">
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Mật khẩu mới</label>
+                <input
+                  type="password"
+                  className="input-field w-full"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Nhập mật khẩu mới"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Xác nhận mật khẩu mới</label>
+                <input
+                  type="password"
+                  className="input-field w-full"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Nhập lại mật khẩu mới"
+                />
+              </div>
             </div>
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Xác nhận mật khẩu mới</label>
-              <input
-                type="password"
-                className="input-field w-full"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="Nhập lại mật khẩu mới"
-              />
+          )}
+        </div>
+
+        {/* Danger Zone */}
+        {!lockSuper && (
+          <div className="bg-white rounded-lg shadow p-6 dark:bg-[#0f0f0f] dark:border dark:border-gray-800 border-red-500/50">
+            <h3 className="font-medium mb-2 text-red-600 dark:text-red-400">Vùng nguy hiểm</h3>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="font-semibold">Xóa tài khoản này</p>
+                <p className="text-sm text-gray-500">
+                  Một khi đã xóa, tất cả dữ liệu sẽ bị xóa vĩnh viễn. Hành động này không thể hoàn tác.
+                </p>
+              </div>
+              <button className="btn-danger" onClick={() => setIsDeleteModalOpen(true)}>
+                Xóa tài khoản
+              </button>
             </div>
           </div>
         )}
       </div>
 
-    </div>
+      {isDeleteModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md p-6">
+            <h3 className="text-lg font-semibold">Xác nhận xóa User</h3>
+            <p className="text-sm text-gray-600 mt-2">
+              Bạn có chắc chắn muốn xóa tài khoản này không? Hành động này không thể hoàn tác.
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button onClick={() => setIsDeleteModalOpen(false)} className="btn-secondary">
+                Hủy
+              </button>
+              <button onClick={handleDelete} className="btn-danger">
+                Xóa vĩnh viễn
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 
 export default AdminUserEdit
-
