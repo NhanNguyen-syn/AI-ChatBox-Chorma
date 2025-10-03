@@ -298,6 +298,14 @@ def _collection_base_name() -> str:
 def _collection_name_for_backend(backend: str, dim: int | None = None) -> str:
     base = _collection_base_name()
     suffix = (backend or "unknown").strip().lower().replace(":", "_").replace(" ", "_")
+    # Clean up model names that might be long
+    if 'text-embedding-3-small' in suffix:
+        suffix = 'openai_1536'
+    elif 'text-embedding-3-large' in suffix:
+        suffix = 'openai_3072'
+    elif 'nomic-embed-text' in suffix:
+        suffix = 'ollama_nomic_embed_text' # Keep full name for clarity
+
     return f"{base}_{suffix}_{dim}" if dim else f"{base}_{suffix}"
 
 

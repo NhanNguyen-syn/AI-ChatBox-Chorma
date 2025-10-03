@@ -14,8 +14,8 @@ openai>=1.10.0
 requests==2.31.0
 pydantic>=2.5.0
 google-generativeai==0.3.2
-huggingface-hub>=0.20.0
-sentence-transformers==2.2.2
+huggingface-hub==0.22.2
+sentence-transformers==2.7.0
 # Pin numpy to <2 to avoid ABI mismatch with matplotlib and other wheels
 numpy==1.26.4
 # OCR & image/PDF helpers

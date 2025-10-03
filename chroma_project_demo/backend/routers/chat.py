@@ -58,17 +58,23 @@ except Exception:
     SentenceTransformer = None  # type: ignore
     _st_model = None  # type: ignore
 
-# Optional CrossEncoder reranker
+# Optional CrossEncoder reranker - Initialize more robustly
 rerank_model = None
 try:
     from sentence_transformers import CrossEncoder
     try:
-        # This model is lightweight and fast, suitable for quick reranking.
-        rerank_model = CrossEncoder('cross-encoder/ms-marco-minilm-l-6-v2', max_length=512)
+        # Use a more reliable model that's likely to be available
+        rerank_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2', max_length=512)
         print("[Chat] CrossEncoder reranker initialized successfully.")
     except Exception as e:
         print(f"[Chat] Could not initialize CrossEncoder for reranking: {e}")
-        rerank_model = None
+        # Try alternative model
+        try:
+            rerank_model = CrossEncoder('cross-encoder/ms-marco-TinyBERT-L-2-v2', max_length=512)
+            print("[Chat] Alternative CrossEncoder reranker initialized successfully.")
+        except Exception as e2:
+            print(f"[Chat] Alternative CrossEncoder also failed: {e2}")
+            rerank_model = None
 except Exception as e:
     print(f"[Chat] sentence-transformers not available for reranking: {e}")
     rerank_model = None
@@ -490,7 +496,7 @@ def _generate_sql_query_with_llm(user_query: str, db_schema: str) -> str:
         return ""
 
     prompt = f"""
-You are an expert Text-to-SQL assistant. Your task is to convert a user's question into a single, valid SQLite SELECT statement.
+You are an expert Text-to-SQL assistant for an internal company database. Your task is to convert a user's question into a single, valid SQLite SELECT statement based ONLY on the provided schema.
 
 **Rules:**
 1.  **ONLY `SELECT`:** You must only generate `SELECT` statements. Do not generate `INSERT`, `UPDATE`, `DELETE`, `DROP`, or any other type of statement.
@@ -1147,28 +1153,44 @@ def _encode_query(text: str):
     # Ưu tiên sử dụng OpenAI embeddings (tốt nhất cho tiếng Việt)
     if USE_OPENAI and openai_client:
         try:
-            resp = openai_client.embeddings.create(model=_cfg_embed_model(), input=text)
-            return resp.data[0].embedding
+            embed_model = _cfg_embed_model()
+            resp = openai_client.embeddings.create(model=embed_model, input=text)
+            embedding = resp.data[0].embedding
+            print(f"[Chat] OpenAI embedding generated: {len(embedding)} dimensions using model {embed_model}")
+            return embedding
         except Exception as e:
             print(f"[Chat] OpenAI embedding failed: {e}")
 
     # Fallback to Gemini embeddings
     if GEMINI_AVAILABLE:
         try:
-            gemini_service = get_gemini_service()
-            embeddings_list = gemini_service.generate_embeddings([text])
-            if embeddings_list:
-                return embeddings_list[0]
+            gemini_service = _get_gemini_service_safe()
+            if gemini_service:
+                embeddings_list = gemini_service.generate_embeddings([text])
+                if embeddings_list:
+                    embedding = embeddings_list[0]
+                    print(f"[Chat] Gemini embedding generated: {len(embedding)} dimensions")
+                    return embedding
         except Exception as e:
             print(f"[Chat] Gemini embedding failed: {e}")
 
     # Fallback to Ollama
     if embeddings:
-        return embeddings.embed_query(text)
+        try:
+            embedding = embeddings.embed_query(text)
+            print(f"[Chat] Ollama embedding generated: {len(embedding)} dimensions")
+            return embedding
+        except Exception as e:
+            print(f"[Chat] Ollama embedding failed: {e}")
 
     # Fallback to local sentence-transformers
     if '_st_model' in globals() and _st_model is not None:
-        return _st_model.encode(text).tolist()
+        try:
+            embedding = _st_model.encode(text).tolist()
+            print(f"[Chat] SentenceTransformer embedding generated: {len(embedding)} dimensions")
+            return embedding
+        except Exception as e:
+            print(f"[Chat] SentenceTransformer embedding failed: {e}")
 
     raise RuntimeError("No embeddings backend available")
 
@@ -1268,29 +1290,30 @@ def _extract_entities_for_filtering(query: str) -> Optional[dict]:
         return None
     try:
         prompt = f'''
-From the user's question, extract key entities that can be used for filtering data.
-Return a JSON object where keys are potential column names (in snake_case) and values are the extracted values.
-Only extract specific, concrete values (like names, codes, numbers). Ignore vague requests.
+You are an entity extraction assistant for an internal system at Dalat Hasfarm.
+Your task is to extract key entities from the user's question that can be used to filter internal company data (like products, documents, allowances, etc.).
+Return a JSON object where keys are potential database column names (in snake_case) and values are the extracted values.
+Only extract specific, concrete values (like product names, codes, numbers, locations). Ignore vague requests.
 
 Example 1:
 Question: "thông tin sản phẩm Rocca painted Mono có mã F01016PA"
 Result: {{"ten_san_pham": "Rocca painted Mono", "ma_san_pham": "F01016PA"}}
 
 Example 2:
-Question: "giá của Laptop Pro là bao nhiêu"
-Result: {{"ten_san_pham": "Laptop Pro"}}
+Question: "giá của hoa Tulip Lima là bao nhiêu"
+Result: {{"ten_san_pham": "Tulip Lima"}}
 
 Example 3:
 Question: "sản phẩm nào có giá 7600"
 Result: {{"gia": 7600}}
 
 Example 4:
-Question: "liệt kê các máy tính"
+Question: "liệt kê các loại hoa"
 Result: {{}}
 
 Example 5:
-Question: "thông tin về sản phẩm Tulip Lima"
-Result: {{"ten_san_pham": "Tulip Lima"}}
+Question: "phụ cấp ăn trưa ở Đà Lạt"
+Result: {{"khu_vuc": "Đà Lạt"}}
 
 User Question: "{query}"
 Result:
@@ -1352,6 +1375,20 @@ ANSWER (YES or NO):
         print(f"[Chat] Context validation failed: {e}")
         return True # Fail open to avoid accidentally blocking good results
 
+def _get_embedding_dimension(model_name: str) -> int:
+    """Get the expected embedding dimension for a given model."""
+    if "text-embedding-3-small" in model_name:
+        return 1536
+    elif "text-embedding-3-large" in model_name:
+        return 3072
+    elif "text-embedding-ada-002" in model_name:
+        return 1536
+    elif "nomic-embed-text" in model_name:
+        return 768
+    else:
+        # Default fallback - try to detect from actual embedding
+        return None
+
 def get_context_with_sources(queries: list[str], collections: list[Any]) -> tuple[str, list[dict]]:
     """Query ChromaDB with a two-stage (filtered -> broad) search, then rerank."""
     if not queries or not collections:
@@ -1361,12 +1398,19 @@ def get_context_with_sources(queries: list[str], collections: list[Any]) -> tupl
     all_results: list[tuple[float, str, dict]] = []
 
     try:
-        # 1. Generate embeddings for the queries
+        # 1. Generate embeddings for the queries and determine dimension
+        embed_model = _cfg_embed_model()
+        expected_dim = _get_embedding_dimension(embed_model)
+
         if USE_OPENAI and openai_client:
-            res = openai_client.embeddings.create(model=_cfg_embed_model(), input=queries)
+            res = openai_client.embeddings.create(model=embed_model, input=queries)
             query_embeddings = [r.embedding for r in res.data]
+            actual_dim = len(query_embeddings[0]) if query_embeddings else None
+            print(f"[Chat] Generated embeddings with dimension: {actual_dim} (expected: {expected_dim})")
         elif _st_model:
             query_embeddings = [e.tolist() for e in _st_model.encode(queries)]
+            actual_dim = len(query_embeddings[0]) if query_embeddings else None
+            print(f"[Chat] Generated embeddings with dimension: {actual_dim}")
         else:
             return "", []
 
@@ -1431,6 +1475,34 @@ def get_context_with_sources(queries: list[str], collections: list[Any]) -> tupl
                 print(f"[Chat] Could not map filter keys for collection {getattr(collection,'name','?')}: {_e}")
                 return where_dict
 
+        # 3. Filter collections by dimension compatibility
+        compatible_collections = []
+        for collection in search_collections:
+            try:
+                # Try to get a sample to check dimension
+                sample = collection.get(limit=1, include=["embeddings"])
+                if sample and sample.get('embeddings') and sample['embeddings'][0]:
+                    collection_dim = len(sample['embeddings'][0][0]) if sample['embeddings'][0] else None
+                    if collection_dim == actual_dim:
+                        compatible_collections.append(collection)
+                        print(f"[Chat] Collection '{getattr(collection, 'name', '?')}' is compatible (dim: {collection_dim})")
+                    else:
+                        print(f"[Chat] Skipping collection '{getattr(collection, 'name', '?')}' - dimension mismatch (collection: {collection_dim}, query: {actual_dim})")
+                else:
+                    # If no embeddings found, assume compatible for backward compatibility
+                    compatible_collections.append(collection)
+                    print(f"[Chat] Collection '{getattr(collection, 'name', '?')}' has no embeddings, assuming compatible")
+            except Exception as e:
+                print(f"[Chat] Error checking collection '{getattr(collection, 'name', '?')}' compatibility: {e}")
+                # On error, assume compatible to avoid breaking existing functionality
+                compatible_collections.append(collection)
+
+        if not compatible_collections:
+            print("[Chat] No compatible collections found for current embedding dimension")
+            return "", []
+
+        search_collections = compatible_collections
+
         if where_filter:
             print(f"[Chat] Stage 1: Performing filtered search with (raw): {where_filter}")
             for collection in search_collections:
@@ -1465,7 +1537,7 @@ def get_context_with_sources(queries: list[str], collections: list[Any]) -> tupl
             else:
                 print("[Chat] No entities found for filtering. Proceeding directly to Stage 2: Broad Search.")
 
-            for collection in collections:
+            for collection in search_collections:  # Use compatible collections only
                 try:
                     results = collection.query(
                         query_embeddings=query_embeddings,
@@ -1516,7 +1588,7 @@ def get_context_with_sources(queries: list[str], collections: list[Any]) -> tupl
         # 4. Consolidate and Rank Results
         all_results.sort(key=lambda x: x[0], reverse=True)
         unique_docs = {doc: meta for _, doc, meta in all_results} # Deduplicate
-        candidates = list(unique_docs.items())[:15]
+        candidates = list(unique_docs.items())[:20]  # Increase candidates for better context
 
         # 5. Rerank and Prune
         source_candidates = [{
@@ -1526,10 +1598,17 @@ def get_context_with_sources(queries: list[str], collections: list[Any]) -> tupl
 
         pruned_context, final_sources = _rerank_and_prune_context(original_query, "", source_candidates)
 
-        # 6. Final validation
-        if not _validate_context_relevance(original_query, pruned_context):
-            print(f"[Chat] Context rejected by final validation for query: '{original_query}'")
-            return "", []
+        # If reranker didn't work well, use top candidates directly
+        if not pruned_context and source_candidates:
+            print("[Chat] Reranker returned empty context, using top candidates directly")
+            top_candidates = source_candidates[:8]  # Use more candidates
+            pruned_context = "\n\n".join([s.get("content", "") for s in top_candidates if s.get("content")])
+            final_sources = top_candidates
+
+        # 6. Final validation (make it less strict)
+        if pruned_context and not _validate_context_relevance(original_query, pruned_context):
+            print(f"[Chat] Context validation failed, but proceeding with available context")
+            # Don't reject completely, just log the warning
 
         # Log the final context before returning
         try:

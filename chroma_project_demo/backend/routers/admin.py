@@ -1420,7 +1420,51 @@ async def get_chat_activity_chart(
     admin: User = Depends(verify_admin),
     db: Session = Depends(get_db)
 ):
-    # Get chat activity for the last 7 days
+    pass
+
+@router.delete("/users/{user_id}")
+async def delete_user_permanently(
+    user_id: str,
+    admin: User = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    user_to_delete = db.query(User).filter(User.id == user_id).first()
+
+    if not user_to_delete:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Prevent deleting super admins
+    if _is_super_admin_username(user_to_delete.username):
+        raise HTTPException(status_code=403, detail="Không thể xóa vĩnh viễn tài khoản super admin.")
+
+    # Optional: Delete related data (e.g., chat sessions and messages)
+    # This ensures data integrity and GDPR compliance.
+    try:
+        user_sessions = db.query(ChatSession).filter(ChatSession.user_id == user_id).all()
+        session_ids = [s.id for s in user_sessions]
+
+        if session_ids:
+            # Delete feedbacks related to the messages in the sessions
+            db.query(Feedback).join(ChatMessage, Feedback.chat_message_id == ChatMessage.id).filter(ChatMessage.session_id.in_(session_ids)).delete(synchronize_session=False)
+            # Delete messages in the sessions
+            db.query(ChatMessage).filter(ChatMessage.session_id.in_(session_ids)).delete(synchronize_session=False)
+
+        # Delete the sessions themselves
+        db.query(ChatSession).filter(ChatSession.user_id == user_id).delete(synchronize_session=False)
+
+        # Delete token usage records
+        db.query(TokenUsage).filter(TokenUsage.user_id == user_id).delete(synchronize_session=False)
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Lỗi khi xóa dữ liệu liên quan: {e}")
+
+    # Finally, delete the user
+    db.delete(user_to_delete)
+    db.commit()
+
+    return {"message": "Tài khoản và tất cả dữ liệu liên quan đã được xóa vĩnh viễn."}
+
     end_date = datetime.utcnow()
     start_date = end_date - timedelta(days=7)
 
