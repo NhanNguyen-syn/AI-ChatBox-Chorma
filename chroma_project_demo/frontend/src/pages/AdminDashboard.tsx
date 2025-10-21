@@ -270,7 +270,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ initialTab = 'overview'
             setFrequentQuestions(frequentQuestions.filter(q => q.question !== question));
             toast.success('Đã ẩn câu hỏi');
         } catch (error) {
-            toast.error('Không thể ẩn câu hỏi');
+            toast.error('Không thể ẩn đi câu hỏi');
         }
     };
 
